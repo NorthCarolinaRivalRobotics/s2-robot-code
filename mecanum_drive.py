@@ -4,7 +4,7 @@ import asyncio
 import math
 import moteus
 import moteus_pi3hat
-
+import time 
 
 class MecanumDrive:
     """
@@ -162,9 +162,11 @@ async def main():
     
     try:
         # Example: Move forward at 0.5 m/s
-        print("Moving forward...")
-        await drive.set_all_velocities(0.2, 0.2, 0.2, 0.2)
-        await asyncio.sleep(1.0)
+        start_time = time.time()
+        while time.time() - start_time < 1.0:
+            print("Moving forward...")
+            await drive.set_all_velocities(0.2, 0.2, 0.2, 0.2)
+            await asyncio.sleep(0.005)
         
         # Stop
         print("Stopping...")

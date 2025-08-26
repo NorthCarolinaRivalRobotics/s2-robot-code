@@ -27,7 +27,7 @@ class TeleopNode(BaseNode):
         super().__init__(config=config)
         
         # Default configuration
-        self.robot_id = "frogbot"
+        self.robot_id = "cash"
         self.update_rate = 30.0  # Hz
         self.max_linear_speed = 1.0  # m/s
         self.max_angular_speed = 1.0  # rad/s
