@@ -4,4 +4,14 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "tide-sdk>=0.1.8",
+]
+
+[project.optional-dependencies]
+laptop = [
+    "pygame>=2.6.1",
+]
+robot = [
+    "moteus-pi3hat>=0.3.31",
+]
