@@ -139,8 +139,8 @@ class TeleopNode(BaseNode):
             
             # Get twist commands from controller
             linear_x = inputs['linear_x']
-            linear_y = inputs['linear_y']
-            angular_z = inputs['angular_z']
+            linear_y = -inputs['linear_y']
+            angular_z = -inputs['angular_z']
             
             # Create and publish twist message
             twist_msg = self._create_twist_message(linear_x, linear_y, angular_z)

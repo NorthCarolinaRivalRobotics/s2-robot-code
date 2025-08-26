@@ -14,4 +14,5 @@ laptop = [
 ]
 robot = [
     "moteus-pi3hat>=0.3.31",
+    "adafruit-circuitpython-bno055>=5.4.20",
 ]
