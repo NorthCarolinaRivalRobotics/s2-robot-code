@@ -48,6 +48,11 @@ class MecanumDrive:
             motor_id: moteus.Controller(id=motor_id, transport=self.transport) 
             for motor_id in motor_ids
         }
+
+        for motor in self.motors.values():
+            motor.set_stop()
+
+
         
     def wheel_speed_to_motor_speed(self, wheel_speed_ms):
         """
