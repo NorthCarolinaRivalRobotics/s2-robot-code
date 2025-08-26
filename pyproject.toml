@@ -1,0 +1,7 @@
+[project]
+name = "rival-s2-robot-code"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
