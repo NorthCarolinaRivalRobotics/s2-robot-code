@@ -148,10 +148,6 @@ class MecanumDrive:
         """Stop all motors."""
         await self.set_all_velocities(0.0, 0.0, 0.0, 0.0)
     
-    async def emergency_stop(self):
-        """Emergency stop - send stop commands to all motors."""
-        commands = [motor.make_stop() for motor in self.motors.values()]
-        await self.transport.cycle(commands)
 
 
 # Example usage
@@ -176,7 +172,7 @@ async def main():
         
     except KeyboardInterrupt:
         print("Emergency stop!")
-        await drive.emergency_stop()
+        await drive.stop_all_motors()
 
 
 if __name__ == "__main__":
