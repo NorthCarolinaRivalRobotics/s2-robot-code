@@ -17,7 +17,7 @@ class MecanumDrive:
     - Motor 2: Back Right
     """
     
-    def __init__(self, motor_ids=[4, 1, 3, 4], servo_bus_map=None):
+    def __init__(self, motor_ids=[4, 1, 3, 2], servo_bus_map=None):
         """
         Initialize the mecanum drive.
         
