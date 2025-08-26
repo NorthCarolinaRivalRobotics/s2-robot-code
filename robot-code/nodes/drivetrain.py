@@ -4,6 +4,8 @@ Drivebase Node for Tide Framework
 Integrates the existing DriveBase class with Tide's node system
 """
 
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from tide.core.node import BaseNode
 from tide import CmdTopic
 from tide.models import Twist2D
@@ -15,7 +17,6 @@ from tide import CmdTopic
 # Import the existing drivebase module
 import sys
 import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from mecanum_drive import MecanumDrive
 
 logger = logging.getLogger(__name__)
