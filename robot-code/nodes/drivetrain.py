@@ -33,36 +33,44 @@ class DrivebaseNode(BaseNode):
     def __init__(self, *, config=None):
         super().__init__(config=config)
         
-        # Initialize drivebase to None - will be initialized asynchronously
+        # Initialize drivebase to None - will be initialized lazily
         self.drivebase = None
-        self._initialization_task = None
+        self._initialization_started = False
+        self._initialization_lock = asyncio.Lock()
         
         # Subscribe to twist commands using proper Tide namespacing
         twist_topic = robot_topic(self.ROBOT_ID, CmdTopic.TWIST.value)
         self.subscribe(twist_topic, self.on_cmd_vel)
         logger.info(f"Subscribed to {twist_topic}")
-        
-        # Start async initialization
-        self._initialization_task = asyncio.create_task(self._async_init())
     
-    async def _async_init(self):
-        """Asynchronously initialize the drivebase."""
-        try:
-            self.drivebase = MecanumDrive()
-            await self.drivebase.set_stops()
-            logger.info(f"Drivebase initialized successfully")
-        except Exception as e:
-            logger.error(f"Failed to initialize Drivebase: {e}")
-            self.drivebase = None
+    async def _ensure_initialized(self):
+        """Ensure drivebase is initialized, initializing if necessary."""
+        if self.drivebase is not None:
+            return
+            
+        async with self._initialization_lock:
+            # Double-check after acquiring lock
+            if self.drivebase is not None:
+                return
+                
+            if self._initialization_started:
+                return
+                
+            self._initialization_started = True
+            try:
+                logger.info("Initializing drivebase...")
+                self.drivebase = MecanumDrive()
+                await self.drivebase.set_stops()
+                logger.info("Drivebase initialized successfully")
+            except Exception as e:
+                logger.error(f"Failed to initialize Drivebase: {e}")
+                self.drivebase = None
+                self._initialization_started = False
     
     def on_cmd_vel(self, sample):
         """
         Handle incoming velocity commands
         """
-        if self.drivebase is None:
-            logger.warning("Drivebase not yet initialized, ignoring command")
-            return
-            
         # Parse the twist command
         twist = sample
         
@@ -72,12 +80,22 @@ class DrivebaseNode(BaseNode):
         angular_z = twist["angular"]["z"]
         
         # Send to drivebase asynchronously (fire and forget)
-        asyncio.create_task(self._drive_async(linear_x, linear_y, angular_z))
-        logger.debug(f"Drive command: linear_x={linear_x:.2f}, linear_y={linear_y:.2f}, angular={angular_z:.2f}")
+        # Use asyncio.ensure_future instead of create_task for better compatibility
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(self._drive_async(linear_x, linear_y, angular_z))
+                logger.debug(f"Drive command: linear_x={linear_x:.2f}, linear_y={linear_y:.2f}, angular={angular_z:.2f}")
+            else:
+                logger.warning("Event loop not running, cannot send drive command")
+        except RuntimeError:
+            logger.warning("No event loop available, cannot send drive command")
     
     async def _drive_async(self, linear_x, linear_y, angular_z):
         """Helper method to handle async drive commands."""
         try:
+            # Ensure drivebase is initialized before using it
+            await self._ensure_initialized()
             if self.drivebase is not None:
                 await self.drivebase.drive(linear_x, linear_y, angular_z)
         except Exception as e:
@@ -95,17 +113,16 @@ class DrivebaseNode(BaseNode):
         """
         Cleanup when node is shutting down
         """
-        # Cancel initialization if still running
-        if self._initialization_task and not self._initialization_task.done():
-            self._initialization_task.cancel()
-            
         if self.drivebase:
             # Stop all motors asynchronously
             try:
-                # Create a cleanup task that will be handled by the event loop
-                asyncio.create_task(self._cleanup_async())
-            except Exception as e:
-                logger.error(f"Error scheduling cleanup: {e}")
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(self._cleanup_async())
+                else:
+                    logger.warning("Event loop not running, cannot perform async cleanup")
+            except RuntimeError:
+                logger.warning("No event loop available, cannot perform async cleanup")
         
         super().cleanup()
     
