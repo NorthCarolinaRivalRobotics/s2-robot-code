@@ -166,7 +166,7 @@ async def main():
         start_time = time.time()
         while time.time() - start_time < 1.0:
             print("Moving forward...")
-            await drive.set_all_velocities(10.0, 10.0, 10.0, 10.0)
+            await drive.set_all_velocities(2.0, 2.0, 2.0, 2.0)
             await asyncio.sleep(0.005)
 
         
