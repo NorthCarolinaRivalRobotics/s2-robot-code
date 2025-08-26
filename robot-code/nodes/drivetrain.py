@@ -74,10 +74,18 @@ class DrivebaseNode(BaseNode):
         # Parse the twist command
         twist = sample
         
-        # Extract linear and angular velocities
-        linear_x = twist["linear"]["x"]
-        linear_y = twist["linear"]["y"]
-        angular_z = twist["angular"]["z"]
+        try:
+            # Extract linear velocities
+            linear_x = twist["linear"]["x"]
+            linear_y = twist["linear"]["y"]
+            
+            # Handle angular velocity - it might be a float or an object with z field
+            angular_data = twist["angular"]
+            angular_z = float(angular_data)
+                
+        except (KeyError, TypeError, ValueError) as e:
+            logger.error(f"Error parsing twist command: {e}, sample: {sample}")
+            return
         
         # Send to drivebase asynchronously (fire and forget)
         # Use asyncio.ensure_future instead of create_task for better compatibility
