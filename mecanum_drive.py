@@ -49,8 +49,7 @@ class MecanumDrive:
             for motor_id in motor_ids
         }
 
-        for motor in self.motors.values():
-            motor.clear_fault()
+
 
 
         
@@ -153,7 +152,9 @@ class MecanumDrive:
         """Stop all motors."""
         await self.set_all_velocities(0.0, 0.0, 0.0, 0.0)
     
-
+    async def set_stops(self):
+        for motor in self.motors.values():
+            await motor.set_stop()
 
 # Example usage
 async def main():
@@ -161,6 +162,7 @@ async def main():
     
     # Create mecanum drive with default motor IDs [1, 2, 3, 4]
     drive = MecanumDrive()
+    await drive.set_stops()
     
     try:
         # Example: Move forward at 0.5 m/s
