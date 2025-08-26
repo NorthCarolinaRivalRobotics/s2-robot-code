@@ -50,7 +50,7 @@ class MecanumDrive:
         }
 
         for motor in self.motors.values():
-            motor.set_stop()
+            motor.clear_fault()
 
 
         
