@@ -115,6 +115,7 @@ class MecanumDrive:
             back_left_ms: Back left wheel velocity in m/s
             back_right_ms: Back right wheel velocity in m/s
         """
+        print(self.wheel_speed_to_motor_speed(front_left_ms))
         commands = [
             self.motors[self.front_left_id].make_position(
                 position=math.nan,
