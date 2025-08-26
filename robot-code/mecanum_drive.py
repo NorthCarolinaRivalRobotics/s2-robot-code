@@ -38,7 +38,12 @@ class MecanumDrive:
         self.back_right_id = motor_ids[3]
 
 
-        self.reversed_motors = [3, 4]
+        self.motor_directons = {
+            1: 1,
+            2: 1,
+            3: -1,
+            4: -1
+        }
 
         # Setup transport
         if servo_bus_map is None:
@@ -67,17 +72,13 @@ class MecanumDrive:
             Motor speed in revolutions per second
         """
         return (wheel_speed_ms / self.WHEEL_CIRCUMFERENCE) * self.GEAR_RATIO
-    
-    async def set_relevant_reversed(self):
-        for motor_id in self.reversed_motors:
-            await self.motors[motor_id].set_reversed(True)
-    
+        
     async def set_front_left_velocity(self, velocity_ms):
         """Set front left motor velocity in m/s."""
         motor_speed = self.wheel_speed_to_motor_speed(velocity_ms)
         command = self.motors[self.front_left_id].make_position(
             position=math.nan,  # Position mode disabled
-            velocity=motor_speed,
+            velocity=motor_speed * self.motor_directons[self.front_left_id],
             maximum_torque=1.0,
             query=False
         )
@@ -88,7 +89,7 @@ class MecanumDrive:
         motor_speed = self.wheel_speed_to_motor_speed(velocity_ms)
         command = self.motors[self.front_right_id].make_position(
             position=math.nan,
-            velocity=motor_speed,
+            velocity=motor_speed * self.motor_directons[self.front_right_id],
             maximum_torque=1.0,
             query=False
         )
@@ -99,7 +100,7 @@ class MecanumDrive:
         motor_speed = self.wheel_speed_to_motor_speed(velocity_ms)
         command = self.motors[self.back_left_id].make_position(
             position=math.nan,
-            velocity=motor_speed,
+            velocity=motor_speed * self.motor_directons[self.back_left_id],
             maximum_torque=1.0,
             query=False
         )
@@ -110,7 +111,7 @@ class MecanumDrive:
         motor_speed = self.wheel_speed_to_motor_speed(velocity_ms)
         command = self.motors[self.back_right_id].make_position(
             position=math.nan,
-            velocity=motor_speed,
+            velocity=motor_speed * self.motor_directons[self.back_right_id] ,
             maximum_torque=1.0,
             query=False
         )
@@ -131,25 +132,25 @@ class MecanumDrive:
         commands = [
             self.motors[self.front_left_id].make_position(
                 position=math.nan,
-                velocity=self.wheel_speed_to_motor_speed(front_left_ms),
+                velocity=self.wheel_speed_to_motor_speed(front_left_ms) * self.motor_directons[self.front_left_id],
                 maximum_torque=1.0,
                 query=False
             ),
             self.motors[self.front_right_id].make_position(
                 position=math.nan,
-                velocity=self.wheel_speed_to_motor_speed(front_right_ms),
+                velocity=self.wheel_speed_to_motor_speed(front_right_ms) * self.motor_directons[self.front_right_id],
                 maximum_torque=1.0,
                 query=False
             ),
             self.motors[self.back_left_id].make_position(
                 position=math.nan,
-                velocity=self.wheel_speed_to_motor_speed(back_left_ms),
+                velocity=self.wheel_speed_to_motor_speed(back_left_ms) * self.motor_directons[self.back_left_id],
                 maximum_torque=1.0,
                 query=False
             ),
             self.motors[self.back_right_id].make_position(
                 position=math.nan,
-                velocity=self.wheel_speed_to_motor_speed(back_right_ms),
+                velocity=self.wheel_speed_to_motor_speed(back_right_ms) * self.motor_directons[self.back_right_id],
                 maximum_torque=1.0,
                 query=False
             )
