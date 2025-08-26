@@ -61,6 +61,7 @@ class DrivebaseNode(BaseNode):
                 logger.info("Initializing drivebase...")
                 self.drivebase = MecanumDrive()
                 await self.drivebase.set_stops()
+                await self.drivebase.set_relevant_reversed()
                 logger.info("Drivebase initialized successfully")
             except Exception as e:
                 logger.error(f"Failed to initialize Drivebase: {e}")

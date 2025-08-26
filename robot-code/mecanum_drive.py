@@ -36,7 +36,10 @@ class MecanumDrive:
         self.front_right_id = motor_ids[1] 
         self.back_left_id = motor_ids[2]
         self.back_right_id = motor_ids[3]
-        
+
+
+        self.reversed_motors = [3, 4]
+
         # Setup transport
         if servo_bus_map is None:
             servo_bus_map = {1: motor_ids}  # Default: all motors on bus 1
@@ -64,6 +67,10 @@ class MecanumDrive:
             Motor speed in revolutions per second
         """
         return (wheel_speed_ms / self.WHEEL_CIRCUMFERENCE) * self.GEAR_RATIO
+    
+    async def set_relevant_reversed(self):
+        for motor_id in self.reversed_motors:
+            await self.motors[motor_id].set_reversed(True)
     
     async def set_front_left_velocity(self, velocity_ms):
         """Set front left motor velocity in m/s."""
@@ -119,6 +126,7 @@ class MecanumDrive:
             back_left_ms: Back left wheel velocity in m/s
             back_right_ms: Back right wheel velocity in m/s
         """
+
         print(self.wheel_speed_to_motor_speed(front_left_ms))
         commands = [
             self.motors[self.front_left_id].make_position(
