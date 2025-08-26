@@ -1,0 +1,36 @@
+# driver-station
+
+A Tide-based robotics project demonstrating the ping/pong example.
+
+## Getting Started
+
+1. Install dependencies:
+
+```bash
+uv add -r requirements.txt
+```
+
+2. Run the project:
+
+```bash
+tide up
+```
+
+
+## Project Structure
+
+- `ping_node.py`: Example publisher node
+- `pong_node.py`: Example subscriber node
+- `config/`: Configuration files
+
+
+## Next Steps
+
+Once you're familiar with the basic structure, you can:
+
+1. Add more complex node types
+2. Create custom message types 
+3. Set up subscriber nodes to process messages
+4. Customize the configuration
+
+Refer to the Tide documentation for more examples and information. 
