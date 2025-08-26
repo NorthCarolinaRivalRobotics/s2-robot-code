@@ -15,9 +15,10 @@ from tide import CmdTopic
 
 # Import the existing drivebase module
 import sys
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from mecanum_drive import MecanumDrive
 
 logger = logging.getLogger(__name__)
