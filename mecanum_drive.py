@@ -26,8 +26,8 @@ class MecanumDrive:
             servo_bus_map: Optional servo bus mapping for pi3hat
         """
         # Wheel constants for 120mm diameter, 6:1 gear ratio
-        self.WHEEL_DIAMETER = 0.120  # 120mm in meters
-        self.GEAR_RATIO = 100.0/29.0  # Motor spins 6 times for 1 wheel rotation
+        self.WHEEL_DIAMETER = 0.109  # 109mm in meters
+        self.GEAR_RATIO = 100.0/29.0
         self.WHEEL_CIRCUMFERENCE = self.WHEEL_DIAMETER * math.pi
         
         # Motor configuration
@@ -166,7 +166,6 @@ async def main():
         while time.time() - start_time < 1.0:
             print("Moving forward...")
             await drive.set_all_velocities(0.2, 0.2, 0.2, 0.2)
-            await asyncio.sleep(0.005)
         
         # Stop
         print("Stopping...")
