@@ -11,13 +11,13 @@ class MecanumDrive:
     Simple mecanum drive class for controlling 4 wheel mecanum robot.
     
     Wheel configuration:
-    - Motor 1: Front Left
-    - Motor 2: Front Right  
+    - Motor 4: Front Left
+    - Motor 1: Front Right  
     - Motor 3: Back Left
-    - Motor 4: Back Right
+    - Motor 2: Back Right
     """
     
-    def __init__(self, motor_ids=[1, 2, 3, 4], servo_bus_map=None):
+    def __init__(self, motor_ids=[4, 1, 3, 4], servo_bus_map=None):
         """
         Initialize the mecanum drive.
         
