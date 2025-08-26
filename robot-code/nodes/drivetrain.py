@@ -87,17 +87,26 @@ class DrivebaseNode(BaseNode):
             logger.error(f"Error parsing twist command: {e}, sample: {sample}")
             return
         
-        # Send to drivebase asynchronously (fire and forget)
-        # Use asyncio.ensure_future instead of create_task for better compatibility
+        # Send to drivebase asynchronously 
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.ensure_future(self._drive_async(linear_x, linear_y, angular_z))
-                logger.debug(f"Drive command: linear_x={linear_x:.2f}, linear_y={linear_y:.2f}, angular={angular_z:.2f}")
-            else:
-                logger.warning("Event loop not running, cannot send drive command")
-        except RuntimeError:
-            logger.warning("No event loop available, cannot send drive command")
+            # Try to get existing event loop first
+            try:
+                loop = asyncio.get_running_loop()
+                # If we have a running loop, schedule the task
+                asyncio.create_task(self._drive_async(linear_x, linear_y, angular_z))
+                logger.debug(f"Drive command scheduled: linear_x={linear_x:.2f}, linear_y={linear_y:.2f}, angular={angular_z:.2f}")
+            except RuntimeError:
+                # No running loop, create a new thread to run the async operation
+                import threading
+                def run_async():
+                    asyncio.run(self._drive_async(linear_x, linear_y, angular_z))
+                
+                thread = threading.Thread(target=run_async, daemon=True)
+                thread.start()
+                logger.debug(f"Drive command (threaded): linear_x={linear_x:.2f}, linear_y={linear_y:.2f}, angular={angular_z:.2f}")
+                
+        except Exception as e:
+            logger.error(f"Error scheduling drive command: {e}")
     
     async def _drive_async(self, linear_x, linear_y, angular_z):
         """Helper method to handle async drive commands."""
@@ -124,13 +133,23 @@ class DrivebaseNode(BaseNode):
         if self.drivebase:
             # Stop all motors asynchronously
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.ensure_future(self._cleanup_async())
-                else:
-                    logger.warning("Event loop not running, cannot perform async cleanup")
-            except RuntimeError:
-                logger.warning("No event loop available, cannot perform async cleanup")
+                # Try to get existing event loop first
+                try:
+                    loop = asyncio.get_running_loop()
+                    asyncio.create_task(self._cleanup_async())
+                except RuntimeError:
+                    # No running loop, run cleanup synchronously
+                    import threading
+                    def run_cleanup():
+                        asyncio.run(self._cleanup_async())
+                    
+                    thread = threading.Thread(target=run_cleanup, daemon=True)
+                    thread.start()
+                    # Wait a bit for cleanup to complete
+                    thread.join(timeout=2.0)
+                    
+            except Exception as e:
+                logger.error(f"Error during cleanup: {e}")
         
         super().cleanup()
     
