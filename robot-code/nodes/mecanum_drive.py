@@ -155,7 +155,13 @@ class MecanumDrive:
     async def set_stops(self):
         for motor in self.motors.values():
             await motor.set_stop()
-
+            
+    async def drive(self, linear_x, linear_y, angular_z):
+        front_left_speed = linear_x + linear_y + angular_z
+        front_right_speed = linear_x - linear_y - angular_z
+        back_left_speed = linear_x - linear_y + angular_z
+        back_right_speed = linear_x + linear_y - angular_z
+        await self.set_all_velocities(front_left_speed, front_right_speed, back_left_speed, back_right_speed)
 # Example usage
 async def main():
     """Example of how to use the MecanumDrive class."""

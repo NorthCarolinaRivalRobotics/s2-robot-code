@@ -1,15 +1,9 @@
 session:
   mode: peer  # Mesh network
 
+# Node definitions
 nodes:
-  # Ping node (publisher example)
-  - type: ping_node.PingNode  # Imports from ping_node.py
+  # Drivebase control node
+  - type: nodes.drivetrain.DrivebaseNode
     params:
-      robot_id: "cash"
-      update_rate: 1.0  # Hz
-      
-  # Pong node (subscriber example)  
-  - type: pong_node.PongNode  # Imports from pong_node.py  
-    params:
-      robot_id: "cash"
-      response_delay: 0.2  # seconds 
+      robot_id: cash
