@@ -135,8 +135,13 @@ class StandaloneDriveController:
     def _on_cmd_twist(self, sample):
         """Handle incoming twist commands."""
         try:
-            # Parse JSON payload
-            data = json.loads(sample.payload.decode('utf-8'))
+            # Parse JSON payload - handle ZBytes properly
+            if hasattr(sample.payload, 'decode'):
+                payload_str = sample.payload.decode('utf-8')
+            else:
+                # ZBytes object - convert to bytes first
+                payload_str = bytes(sample.payload).decode('utf-8')
+            data = json.loads(payload_str)
             
             # Extract velocities with anti-tip feedback
             pitch_velocity = 0.0
@@ -158,12 +163,18 @@ class StandaloneDriveController:
             asyncio.create_task(self._execute_drive_command(linear_x, linear_y, angular_z))
             
         except (json.JSONDecodeError, KeyError, ValueError) as e:
-            logger.error(f"Error parsing twist command: {e}, payload: {sample.payload}")
+            logger.error(f"Error parsing twist command: {e}, payload type: {type(sample.payload)}")
     
     def _on_imu_angular_velocity(self, sample):
         """Handle incoming IMU angular velocity data."""
         try:
-            data = json.loads(sample.payload.decode('utf-8'))
+            # Parse JSON payload - handle ZBytes properly
+            if hasattr(sample.payload, 'decode'):
+                payload_str = sample.payload.decode('utf-8')
+            else:
+                # ZBytes object - convert to bytes first
+                payload_str = bytes(sample.payload).decode('utf-8')
+            data = json.loads(payload_str)
             self.imu_angular_velocity = {
                 'x': data.get('x', 0.0),
                 'y': data.get('y', 0.0),
@@ -171,7 +182,7 @@ class StandaloneDriveController:
             }
             logger.debug(f"IMU angular velocity: {self.imu_angular_velocity}")
         except (json.JSONDecodeError, KeyError) as e:
-            logger.error(f"Error parsing IMU data: {e}, payload: {sample.payload}")
+            logger.error(f"Error parsing IMU data: {e}, payload type: {type(sample.payload)}")
     
     async def _execute_drive_command(self, linear_x, linear_y, angular_z):
         """Execute drive command and update state."""

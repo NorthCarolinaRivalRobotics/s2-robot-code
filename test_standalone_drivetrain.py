@@ -21,13 +21,19 @@ async def test_drivetrain():
     session = zenoh.open(config)
     
     # Setup publishers and subscribers
-    cmd_publisher = session.declare_publisher("/cash/cmd/twist")
+    cmd_publisher = session.declare_publisher("cash/cmd/twist")
     
     def on_state_twist(sample):
-        data = json.loads(sample.payload.decode('utf-8'))
+        # Handle ZBytes properly
+        if hasattr(sample.payload, 'decode'):
+            payload_str = sample.payload.decode('utf-8')
+        else:
+            # ZBytes object - convert to bytes first
+            payload_str = bytes(sample.payload).decode('utf-8')
+        data = json.loads(payload_str)
         print(f"State: linear=({data['linear']['x']:.3f}, {data['linear']['y']:.3f}), angular={data['angular']:.3f}")
     
-    state_subscriber = session.declare_subscriber("/cash/state/twist", on_state_twist)
+    state_subscriber = session.declare_subscriber("cash/state/twist", on_state_twist)
     
     try:
         print("Testing standalone drivetrain controller...")
