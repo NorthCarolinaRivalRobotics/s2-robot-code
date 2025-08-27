@@ -12,7 +12,7 @@ from tide.models.serialization import to_zenoh_value
 from tide.namespaces import robot_topic
 import logging
 import asyncio
-from tide import CmdTopic
+import time
 
 # Import the existing drivebase module
 import sys
@@ -44,6 +44,7 @@ class DrivebaseNode(BaseNode):
         
         # Store current twist state for publishing
         self.current_twist = Twist2D(linear=Vector2(x=0.0, y=0.0), angular=0.0)
+        self.last_command_time = 0.0
         
         # Subscribe to twist commands using proper Tide namespacing
         twist_topic = robot_topic(self.ROBOT_ID, CmdTopic.TWIST.value)
@@ -128,6 +129,9 @@ class DrivebaseNode(BaseNode):
             logger.error(f"Error parsing twist command: {e}, sample: {sample}")
             return
         
+        # Update last command time
+        self.last_command_time = time.time()
+        
         # Send to drivebase asynchronously 
         try:
             # Try to get existing event loop first
@@ -167,36 +171,36 @@ class DrivebaseNode(BaseNode):
         """
         return self.current_twist
     
-    async def _read_current_twist(self):
-        """
-        Read current wheel velocities and convert to twist.
-        
-        Returns:
-            Twist2D: Current robot twist based on wheel velocities and IMU
-        """
-        if self.drivebase is None:
-            return self.current_twist
-            
+
+    
+    async def _drive_async(self, linear_x, linear_y, angular_z):
+        """Helper method to handle async drive commands and read velocities simultaneously."""
         try:
-            # Get wheel velocities
-            wheel_velocities = await self.drivebase.get_wheel_velocities_named()
-            
-            # Convert mecanum wheel velocities to robot twist
-            # Mecanum kinematics: [front_left, front_right, back_left, back_right]
-            # For mecanum drive: vx = (fl + fr + bl + br) / 4
-            #                   vy = (-fl + fr + bl - br) / 4  
-            #                   wz = (-fl - fr + bl + br) / (4 * robot_width)
-            # 
-            # For this implementation, we'll use a simplified approach since we don't have
-            # the exact robot dimensions, and we have IMU angular velocity available
-            
+            # Ensure drivebase is initialized before using it
+            await self._ensure_initialized()
+            if self.drivebase is not None:
+                # Use combined command+query for better performance
+                wheel_velocities = await self.drivebase.drive(
+                    linear_x, linear_y, angular_z, query_velocities=True
+                )
+                
+                # If we got velocity data, update twist state and publish
+                if wheel_velocities:
+                    await self._update_twist_from_wheels(wheel_velocities)
+                
+        except Exception as e:
+            logger.error(f"Error in drive command: {e}")
+    
+    async def _update_twist_from_wheels(self, wheel_velocities):
+        """Update twist state from wheel velocities and publish."""
+        try:
+            # Convert wheel velocities to robot twist
             fl = wheel_velocities.get('front_left', 0.0)
             fr = wheel_velocities.get('front_right', 0.0)
             bl = wheel_velocities.get('back_left', 0.0)
             br = wheel_velocities.get('back_right', 0.0)
             
-            # Calculate linear velocities from wheel speeds
-            # For mecanum drive kinematics
+            # Calculate linear velocities from wheel speeds (mecanum kinematics)
             linear_x = (fl + fr + bl + br) / 4.0
             linear_y = (-fl + fr + bl - br) / 4.0
             
@@ -205,37 +209,28 @@ class DrivebaseNode(BaseNode):
                 angular_z = self.imu_angular_velocity['z']
             else:
                 # Estimate angular velocity from wheels (requires robot width)
-                # Using a rough estimate for robot width
                 robot_width_estimate = 0.3  # 30cm, adjust based on actual robot
                 angular_z = (-fl - fr + bl + br) / (4.0 * robot_width_estimate)
             
-            # Create and return Twist2D message
+            # Create and update current twist
             twist_msg = Twist2D(
                 linear=Vector2(x=linear_x, y=linear_y),
                 angular=angular_z
             )
             
-            return twist_msg
+            self.current_twist = twist_msg
+            
+            # Publish to state twist topic
+            self.put(self.state_twist_topic, to_zenoh_value(twist_msg))
             
         except Exception as e:
-            logger.error(f"Error reading current twist: {e}")
-            return self.current_twist
-    
-    async def _drive_async(self, linear_x, linear_y, angular_z):
-        """Helper method to handle async drive commands."""
-        try:
-            # Ensure drivebase is initialized before using it
-            await self._ensure_initialized()
-            if self.drivebase is not None:
-                await self.drivebase.drive(linear_x, linear_y, angular_z)
-        except Exception as e:
-            logger.error(f"Error in drive command: {e}")
+            logger.error(f"Error updating twist from wheels: {e}")
                 
     
     def step(self):
         """
         Main step function - called periodically
-        Reads current wheel velocities and publishes twist state
+        Twist state is now published automatically during drive commands for better performance
         """
         # Initialize step counter
         if hasattr(self, '_step_count'):
@@ -243,24 +238,17 @@ class DrivebaseNode(BaseNode):
         else:
             self._step_count = 1
         
-        # Read and publish current twist state
-        try:
-            # Use asyncio to run the async twist reading
-            try:
-                loop = asyncio.get_running_loop()
-                # Schedule the task to read and publish twist
-                asyncio.create_task(self._read_and_publish_twist())
-            except RuntimeError:
-                # No running loop, create a new thread to run the async operation
-                import threading
-                def run_async():
-                    asyncio.run(self._read_and_publish_twist())
-                
-                thread = threading.Thread(target=run_async, daemon=True)
-                thread.start()
-                
-        except Exception as e:
-            logger.error(f"Error in step function: {e}")
+        # If we haven't received a command in a while, query velocities to update state
+        current_time = time.time()
+        if current_time - self.last_command_time > 0.5:  # 500ms timeout
+            # Query velocities less frequently when idle to reduce overhead
+            if self._step_count % 10 == 0:  # Every ~333ms at 30Hz
+                try:
+                    loop = asyncio.get_running_loop()
+                    asyncio.create_task(self._query_idle_velocities())
+                except RuntimeError:
+                    # No running loop, skip idle query to avoid threading overhead
+                    pass
             
         # Log IMU angular velocity periodically for monitoring
         if self._step_count % 90 == 0 and self.imu_angular_velocity is not None:
@@ -268,32 +256,26 @@ class DrivebaseNode(BaseNode):
                        f"x: {self.imu_angular_velocity['x']:.3f}, "
                        f"y: {self.imu_angular_velocity['y']:.3f}, "
                        f"z: {self.imu_angular_velocity['z']:.3f} rad/s")
+        
+        # Log current twist state periodically
+        if self._step_count % 90 == 0:
+            logger.info(f"Current twist state - "
+                       f"linear: ({self.current_twist.linear.x:.3f}, {self.current_twist.linear.y:.3f}), "
+                       f"angular: {self.current_twist.angular:.3f}")
     
-    async def _read_and_publish_twist(self):
-        """Read current twist and publish to state topic."""
+    async def _query_idle_velocities(self):
+        """Query velocities when robot is idle to maintain state accuracy."""
         try:
-            # Ensure drivebase is initialized
             await self._ensure_initialized()
-            if self.drivebase is None:
-                return
-                
-            # Read current twist from wheel velocities
-            current_twist = await self._read_current_twist()
-            
-            # Update stored current twist
-            self.current_twist = current_twist
-            
-            # Publish to state twist topic
-            self.put(self.state_twist_topic, to_zenoh_value(current_twist))
-            
-            # Log periodically (every 30 steps = ~1 second at 30Hz)
-            if hasattr(self, '_step_count') and self._step_count % 30 == 0:
-                logger.debug(f"Published twist state - "
-                           f"linear: ({current_twist.linear.x:.3f}, {current_twist.linear.y:.3f}), "
-                           f"angular: {current_twist.angular:.3f}")
-                           
+            if self.drivebase is not None:
+                # Send zero command with query to get current velocities
+                wheel_velocities = await self.drivebase.drive(0.0, 0.0, 0.0, query_velocities=True)
+                if wheel_velocities:
+                    await self._update_twist_from_wheels(wheel_velocities)
         except Exception as e:
-            logger.error(f"Error reading and publishing twist: {e}")
+            logger.error(f"Error querying idle velocities: {e}")
+    
+
     
     def cleanup(self):
         """

@@ -134,45 +134,76 @@ class MecanumDrive:
         )
         await self.transport.cycle([command])
     
-    async def set_all_velocities(self, front_left_ms, front_right_ms, back_left_ms, back_right_ms):
+    async def set_all_velocities(self, front_left_ms, front_right_ms, back_left_ms, back_right_ms, query_velocities=False):
         """
-        Set all motor velocities simultaneously.
+        Set all motor velocities simultaneously, optionally querying current velocities.
         
         Args:
             front_left_ms: Front left wheel velocity in m/s
             front_right_ms: Front right wheel velocity in m/s  
             back_left_ms: Back left wheel velocity in m/s
             back_right_ms: Back right wheel velocity in m/s
+            query_velocities: If True, also query current velocities and return them
+            
+        Returns:
+            dict or None: If query_velocities=True, returns dict with wheel velocities in m/s
         """
-
-        print(self.wheel_speed_to_motor_speed(front_left_ms))
         commands = [
             self.motors[self.front_left_id].make_position(
                 position=math.nan,
                 velocity=self.wheel_speed_to_motor_speed(front_left_ms) * self.motor_directons[self.front_left_id],
                 maximum_torque=1.0,
-                query=False
+                query=query_velocities
             ),
             self.motors[self.front_right_id].make_position(
                 position=math.nan,
                 velocity=self.wheel_speed_to_motor_speed(front_right_ms) * self.motor_directons[self.front_right_id],
                 maximum_torque=1.0,
-                query=False
+                query=query_velocities
             ),
             self.motors[self.back_left_id].make_position(
                 position=math.nan,
                 velocity=self.wheel_speed_to_motor_speed(back_left_ms) * self.motor_directons[self.back_left_id],
                 maximum_torque=1.0,
-                query=False
+                query=query_velocities
             ),
             self.motors[self.back_right_id].make_position(
                 position=math.nan,
                 velocity=self.wheel_speed_to_motor_speed(back_right_ms) * self.motor_directons[self.back_right_id],
                 maximum_torque=1.0,
-                query=False
+                query=query_velocities
             )
         ]
-        await self.transport.cycle(commands)
+        
+        results = await self.transport.cycle(commands)
+        
+        # If querying velocities, parse and return them
+        if query_velocities and results:
+            wheel_velocities = {}
+            for result in results:
+                if result.id in self.motor_ids:
+                    try:
+                        motor_speed = result.values[moteus.Register.VELOCITY]
+                        wheel_speed = self.motor_speed_to_wheel_speed(motor_speed, result.id)
+                        wheel_velocities[result.id] = wheel_speed
+                        # Update previous velocity for fallback
+                        self.previous_motor_velocities[result.id] = motor_speed
+                    except (KeyError, AttributeError):
+                        # Use previous velocity if current read fails
+                        wheel_speed = self.motor_speed_to_wheel_speed(
+                            self.previous_motor_velocities[result.id], result.id
+                        )
+                        wheel_velocities[result.id] = wheel_speed
+            
+            # Convert to named format
+            return {
+                'front_left': wheel_velocities.get(self.front_left_id, 0.0),
+                'front_right': wheel_velocities.get(self.front_right_id, 0.0),
+                'back_left': wheel_velocities.get(self.back_left_id, 0.0),
+                'back_right': wheel_velocities.get(self.back_right_id, 0.0)
+            }
+        
+        return None
     
     async def stop_all_motors(self):
         """Stop all motors."""
@@ -239,12 +270,28 @@ class MecanumDrive:
             'back_right': velocities.get(self.back_right_id, 0.0)
         }
             
-    async def drive(self, linear_x, linear_y, angular_z):
+    async def drive(self, linear_x, linear_y, angular_z, query_velocities=False):
+        """
+        Drive the robot with mecanum kinematics.
+        
+        Args:
+            linear_x: Linear velocity in x direction (m/s)
+            linear_y: Linear velocity in y direction (m/s)
+            angular_z: Angular velocity around z axis (rad/s)
+            query_velocities: If True, also query and return current velocities
+            
+        Returns:
+            dict or None: If query_velocities=True, returns wheel velocities
+        """
         front_left_speed = linear_x + linear_y + angular_z
         front_right_speed = linear_x - linear_y - angular_z
         back_left_speed = linear_x - linear_y + angular_z
         back_right_speed = linear_x + linear_y - angular_z
-        await self.set_all_velocities(front_left_speed, front_right_speed, back_left_speed, back_right_speed)
+        
+        return await self.set_all_velocities(
+            front_left_speed, front_right_speed, back_left_speed, back_right_speed,
+            query_velocities=query_velocities
+        )
 # Example usage
 async def main():
     """Example of how to use the MecanumDrive class."""
