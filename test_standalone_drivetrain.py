@@ -8,10 +8,12 @@ import time
 import zenoh
 import logging
 
+# Import Tide models and serialization
 try:
-    import cbor2
+    from tide.models import Twist2D, Vector2
+    from tide.models.serialization import to_zenoh_value, from_zenoh_value
 except ImportError:
-    print("Error: cbor2 package not found. Install with: pip install cbor2")
+    print("Error: tide-sdk package not found. Install with: pip install tide-sdk")
     exit(1)
 
 # Configure logging
@@ -29,10 +31,9 @@ async def test_drivetrain():
     cmd_publisher = session.declare_publisher("cash/cmd/twist")
     
     def on_state_twist(sample):
-        # Handle ZBytes properly and decode CBOR
-        payload_bytes = bytes(sample.payload)
-        data = cbor2.loads(payload_bytes)
-        print(f"State: linear=({data['linear']['x']:.3f}, {data['linear']['y']:.3f}), angular={data['angular']:.3f}")
+        # Parse using Tide serialization
+        twist_msg = from_zenoh_value(sample.payload, Twist2D)
+        print(f"State: linear=({twist_msg.linear.x:.3f}, {twist_msg.linear.y:.3f}), angular={twist_msg.angular:.3f}")
     
     state_subscriber = session.declare_subscriber("cash/state/twist", on_state_twist)
     
@@ -44,32 +45,32 @@ async def test_drivetrain():
         
         # Test 1: Move forward
         print("\nTest 1: Moving forward...")
-        cmd = {"linear": {"x": 0.5, "y": 0.0}, "angular": 0.0}
-        cmd_publisher.put(cbor2.dumps(cmd))
+        cmd = Twist2D(linear=Vector2(x=0.5, y=0.0), angular=0.0)
+        cmd_publisher.put(to_zenoh_value(cmd))
         await asyncio.sleep(3.0)
         
         # Test 2: Stop
         print("\nTest 2: Stopping...")
-        cmd = {"linear": {"x": 0.0, "y": 0.0}, "angular": 0.0}
-        cmd_publisher.put(cbor2.dumps(cmd))
+        cmd = Twist2D(linear=Vector2(x=0.0, y=0.0), angular=0.0)
+        cmd_publisher.put(to_zenoh_value(cmd))
         await asyncio.sleep(2.0)
         
         # Test 3: Strafe right
         print("\nTest 3: Strafing right...")
-        cmd = {"linear": {"x": 0.0, "y": 0.3}, "angular": 0.0}
-        cmd_publisher.put(cbor2.dumps(cmd))
+        cmd = Twist2D(linear=Vector2(x=0.0, y=0.3), angular=0.0)
+        cmd_publisher.put(to_zenoh_value(cmd))
         await asyncio.sleep(3.0)
         
         # Test 4: Rotate
         print("\nTest 4: Rotating...")
-        cmd = {"linear": {"x": 0.0, "y": 0.0}, "angular": 1.0}
-        cmd_publisher.put(cbor2.dumps(cmd))
+        cmd = Twist2D(linear=Vector2(x=0.0, y=0.0), angular=1.0)
+        cmd_publisher.put(to_zenoh_value(cmd))
         await asyncio.sleep(3.0)
         
         # Test 5: Stop
         print("\nTest 5: Final stop...")
-        cmd = {"linear": {"x": 0.0, "y": 0.0}, "angular": 0.0}
-        cmd_publisher.put(cbor2.dumps(cmd))
+        cmd = Twist2D(linear=Vector2(x=0.0, y=0.0), angular=0.0)
+        cmd_publisher.put(to_zenoh_value(cmd))
         await asyncio.sleep(2.0)
         
         print("\nTest completed!")
@@ -78,8 +79,8 @@ async def test_drivetrain():
         print("Test interrupted")
     finally:
         # Final stop command
-        cmd = {"linear": {"x": 0.0, "y": 0.0}, "angular": 0.0}
-        cmd_publisher.put(cbor2.dumps(cmd))
+        cmd = Twist2D(linear=Vector2(x=0.0, y=0.0), angular=0.0)
+        cmd_publisher.put(to_zenoh_value(cmd))
         session.close()
 
 if __name__ == "__main__":

@@ -11,10 +11,12 @@ import math
 import sys
 import os
 
+# Import Tide models and serialization
 try:
-    import cbor2
+    from tide.models import Twist2D, Vector2, Vector3
+    from tide.models.serialization import to_zenoh_value, from_zenoh_value
 except ImportError:
-    print("Error: cbor2 package not found. Install with: pip install cbor2")
+    print("Error: tide-sdk package not found. Install with: pip install tide-sdk")
     sys.exit(1)
 
 # Add robot-code directory to path to import mecanum_drive
@@ -49,11 +51,11 @@ class StandaloneDriveController:
         self.state_twist_topic = f"{robot_id}/state/twist"
         self.gyro_topic = f"{robot_id}/sensor/gyro/vel"
         
-        # State tracking
-        self.current_twist = {
-            "linear": {"x": 0.0, "y": 0.0},
-            "angular": 0.0
-        }
+        # State tracking - use Tide models
+        self.current_twist = Twist2D(
+            linear=Vector2(x=0.0, y=0.0),
+            angular=0.0
+        )
         self.imu_angular_velocity = None
         self.last_command_time = 0.0
         self._pending_command = None
@@ -140,20 +142,19 @@ class StandaloneDriveController:
     def _on_cmd_twist(self, sample):
         """Handle incoming twist commands."""
         try:
-            # Parse CBOR payload - handle ZBytes properly
-            payload_bytes = bytes(sample.payload)
-            data = cbor2.loads(payload_bytes)
+            # Parse Zenoh payload using Tide serialization
+            twist_msg = from_zenoh_value(sample.payload, Twist2D)
             
             # Extract velocities with anti-tip feedback
             pitch_velocity = 0.0
             if self.imu_angular_velocity:
-                pitch_velocity = self.imu_angular_velocity.get('y', 0.0)
+                pitch_velocity = self.imu_angular_velocity.y
             
             anti_tip_feedback = pitch_velocity * 0.00  # Disabled for now
             
-            linear_x = data["linear"]["x"] + anti_tip_feedback
-            linear_y = data["linear"]["y"]
-            angular_z = float(data["angular"])
+            linear_x = twist_msg.linear.x + anti_tip_feedback
+            linear_y = twist_msg.linear.y
+            angular_z = twist_msg.angular
             
             logger.debug(f"Received cmd_twist: linear=({linear_x:.3f}, {linear_y:.3f}), angular={angular_z:.3f}")
             
@@ -164,22 +165,17 @@ class StandaloneDriveController:
             # We'll handle this synchronously to avoid task scheduling issues
             self._schedule_drive_command(linear_x, linear_y, angular_z)
             
-        except (cbor2.CBORDecodeError, KeyError, ValueError) as e:
+        except (Exception) as e:
             logger.error(f"Error parsing twist command: {e}, payload type: {type(sample.payload)}")
     
     def _on_imu_angular_velocity(self, sample):
         """Handle incoming IMU angular velocity data."""
         try:
-            # Parse CBOR payload - handle ZBytes properly
-            payload_bytes = bytes(sample.payload)
-            data = cbor2.loads(payload_bytes)
-            self.imu_angular_velocity = {
-                'x': data.get('x', 0.0),
-                'y': data.get('y', 0.0),
-                'z': data.get('z', 0.0)
-            }
-            logger.debug(f"IMU angular velocity: {self.imu_angular_velocity}")
-        except (cbor2.CBORDecodeError, KeyError) as e:
+            # Parse Zenoh payload using Tide serialization
+            self.imu_angular_velocity = from_zenoh_value(sample.payload, Vector3)
+            logger.debug(f"IMU angular velocity: x={self.imu_angular_velocity.x:.3f}, "
+                        f"y={self.imu_angular_velocity.y:.3f}, z={self.imu_angular_velocity.z:.3f}")
+        except (Exception) as e:
             logger.error(f"Error parsing IMU data: {e}, payload type: {type(sample.payload)}")
     
     def _schedule_drive_command(self, linear_x, linear_y, angular_z):
@@ -225,18 +221,18 @@ class StandaloneDriveController:
             linear_y = (-fl + fr + bl - br) / 4.0
             
             # Use IMU angular velocity if available, otherwise estimate from wheels
-            if self.imu_angular_velocity and 'z' in self.imu_angular_velocity:
-                angular_z = self.imu_angular_velocity['z']
+            if self.imu_angular_velocity:
+                angular_z = self.imu_angular_velocity.z
             else:
                 # Estimate angular velocity from wheels (robot width ~30cm)
                 robot_width = 0.3
                 angular_z = (-fl - fr + bl + br) / (4.0 * robot_width)
             
-            # Update current state
-            self.current_twist = {
-                "linear": {"x": linear_x, "y": linear_y},
-                "angular": angular_z
-            }
+            # Update current state using Tide models
+            self.current_twist = Twist2D(
+                linear=Vector2(x=linear_x, y=linear_y),
+                angular=angular_z
+            )
             
             # Publish state
             await self._publish_state()
@@ -248,9 +244,10 @@ class StandaloneDriveController:
         """Publish current twist state."""
         try:
             if self.state_publisher:
-                payload = cbor2.dumps(self.current_twist)
+                payload = to_zenoh_value(self.current_twist)
                 self.state_publisher.put(payload)
-                logger.debug(f"Published state: {self.current_twist}")
+                logger.debug(f"Published state: linear=({self.current_twist.linear.x:.3f}, "
+                           f"{self.current_twist.linear.y:.3f}), angular={self.current_twist.angular:.3f}")
         except Exception as e:
             logger.error(f"Error publishing state: {e}")
     
@@ -281,8 +278,10 @@ class StandaloneDriveController:
                 if step_count % 900 == 0:  # Every 30 seconds at 30Hz
                     logger.info(f"Control loop running - step {step_count}")
                     if self.imu_angular_velocity:
-                        logger.info(f"IMU angular velocity: {self.imu_angular_velocity}")
-                    logger.info(f"Current twist: {self.current_twist}")
+                        logger.info(f"IMU angular velocity: x={self.imu_angular_velocity.x:.3f}, "
+                                   f"y={self.imu_angular_velocity.y:.3f}, z={self.imu_angular_velocity.z:.3f}")
+                    logger.info(f"Current twist: linear=({self.current_twist.linear.x:.3f}, "
+                               f"{self.current_twist.linear.y:.3f}), angular={self.current_twist.angular:.3f}")
                 
                 await asyncio.sleep(1.0 / 30.0)  # 30Hz control loop
                 
