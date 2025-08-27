@@ -5,12 +5,17 @@ Uses zenoh directly for communication without Tide framework
 """
 
 import asyncio
-import json
 import logging
 import time
 import math
 import sys
 import os
+
+try:
+    import cbor2
+except ImportError:
+    print("Error: cbor2 package not found. Install with: pip install cbor2")
+    sys.exit(1)
 
 # Add robot-code directory to path to import mecanum_drive
 sys.path.append(os.path.join(os.path.dirname(__file__), 'robot-code'))
@@ -135,13 +140,9 @@ class StandaloneDriveController:
     def _on_cmd_twist(self, sample):
         """Handle incoming twist commands."""
         try:
-            # Parse JSON payload - handle ZBytes properly
-            if hasattr(sample.payload, 'decode'):
-                payload_str = sample.payload.decode('utf-8')
-            else:
-                # ZBytes object - convert to bytes first
-                payload_str = bytes(sample.payload).decode('utf-8')
-            data = json.loads(payload_str)
+            # Parse CBOR payload - handle ZBytes properly
+            payload_bytes = bytes(sample.payload)
+            data = cbor2.loads(payload_bytes)
             
             # Extract velocities with anti-tip feedback
             pitch_velocity = 0.0
@@ -162,26 +163,22 @@ class StandaloneDriveController:
             # Schedule drive command
             asyncio.create_task(self._execute_drive_command(linear_x, linear_y, angular_z))
             
-        except (json.JSONDecodeError, KeyError, ValueError) as e:
+        except (cbor2.CBORDecodeError, KeyError, ValueError) as e:
             logger.error(f"Error parsing twist command: {e}, payload type: {type(sample.payload)}")
     
     def _on_imu_angular_velocity(self, sample):
         """Handle incoming IMU angular velocity data."""
         try:
-            # Parse JSON payload - handle ZBytes properly
-            if hasattr(sample.payload, 'decode'):
-                payload_str = sample.payload.decode('utf-8')
-            else:
-                # ZBytes object - convert to bytes first
-                payload_str = bytes(sample.payload).decode('utf-8')
-            data = json.loads(payload_str)
+            # Parse CBOR payload - handle ZBytes properly
+            payload_bytes = bytes(sample.payload)
+            data = cbor2.loads(payload_bytes)
             self.imu_angular_velocity = {
                 'x': data.get('x', 0.0),
                 'y': data.get('y', 0.0),
                 'z': data.get('z', 0.0)
             }
             logger.debug(f"IMU angular velocity: {self.imu_angular_velocity}")
-        except (json.JSONDecodeError, KeyError) as e:
+        except (cbor2.CBORDecodeError, KeyError) as e:
             logger.error(f"Error parsing IMU data: {e}, payload type: {type(sample.payload)}")
     
     async def _execute_drive_command(self, linear_x, linear_y, angular_z):
@@ -241,7 +238,7 @@ class StandaloneDriveController:
         """Publish current twist state."""
         try:
             if self.state_publisher:
-                payload = json.dumps(self.current_twist)
+                payload = cbor2.dumps(self.current_twist)
                 self.state_publisher.put(payload)
                 logger.debug(f"Published state: {self.current_twist}")
         except Exception as e:

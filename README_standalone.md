@@ -17,11 +17,11 @@ This is a standalone async Python program that controls the mecanum drive system
 Install the required dependencies:
 
 ```bash
-# Install with robot dependencies (includes zenoh)
+# Install with robot dependencies (includes zenoh and cbor2)
 pip install -e ".[robot]"
 
-# Or install zenoh separately if you already have other deps
-pip install zenoh>=0.11.0
+# Or install dependencies separately if you already have other deps
+pip install zenoh>=0.11.0 cbor2>=5.4.0
 ```
 
 ### Running the Controller
@@ -50,24 +50,26 @@ python test_standalone_drivetrain.py
 
 ## Message Format
 
-### Command Twist (`/cash/cmd/twist`)
-```json
+All messages use **CBOR (Concise Binary Object Representation)** for serialization, same as the Tide framework.
+
+### Command Twist (`cash/cmd/twist`)
+```python
 {
   "linear": {"x": 0.5, "y": 0.0},
   "angular": 1.0
 }
 ```
 
-### State Twist (`/cash/state/twist`)
-```json
+### State Twist (`cash/state/twist`)
+```python
 {
   "linear": {"x": 0.48, "y": 0.02},
   "angular": 0.95
 }
 ```
 
-### IMU Angular Velocity (`/cash/sensor/gyro/vel`)
-```json
+### IMU Angular Velocity (`cash/sensor/gyro/vel`)
+```python
 {
   "x": 0.01,
   "y": -0.02,
@@ -80,7 +82,7 @@ python test_standalone_drivetrain.py
 1. **No threading issues**: Pure async/await pattern
 2. **Direct zenoh**: No Tide abstractions or runtime
 3. **Simplified initialization**: Direct async initialization 
-4. **JSON messaging**: Simple JSON payloads instead of Tide serialization
+4. **CBOR messaging**: Compatible CBOR serialization matching Tide framework
 5. **Independent operation**: Can run standalone without Tide infrastructure
 
 ## Control Loop
