@@ -3,11 +3,7 @@ session:
 
 # Node definitions
 nodes:
-  # Drivebase control node
-  - type: nodes.drivetrain.DrivebaseNode
-    params:
-      robot_id: cash
-  
+
   # IMU sensor node
   - type: nodes.imu_node.IMUNode
     params:
