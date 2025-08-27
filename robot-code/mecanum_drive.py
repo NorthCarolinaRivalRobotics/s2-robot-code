@@ -50,7 +50,7 @@ class MecanumDrive:
 
         # Setup transport
         if servo_bus_map is None:
-            servo_bus_map = {1: motor_ids}  # Default: all motors on bus 1
+            servo_bus_map = {1: [1,2], 2: [3,4]}  # Default: all motors on bus 1
         
         self.transport = moteus_pi3hat.Pi3HatRouter(servo_bus_map=servo_bus_map)
         
