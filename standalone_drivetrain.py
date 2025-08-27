@@ -11,7 +11,7 @@ import math
 import sys
 import os
 
-from tide import CmdTopic, robot_topic
+from tide import CmdTopic, SensorTopic, StateTopic, robot_topic
 
 # Import Tide models and serialization
 try:
