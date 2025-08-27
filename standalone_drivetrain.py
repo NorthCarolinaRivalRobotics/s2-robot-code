@@ -11,6 +11,8 @@ import math
 import sys
 import os
 
+from tide import CmdTopic, robot_topic
+
 # Import Tide models and serialization
 try:
     from tide.models import Twist2D, Vector2, Vector3
@@ -47,9 +49,9 @@ class StandaloneDriveController:
         self._initialization_started = False
         
         # Topic names
-        self.cmd_twist_topic = f"{robot_id}/cmd/twist"
-        self.state_twist_topic = f"{robot_id}/state/twist"
-        self.gyro_topic = f"{robot_id}/sensor/gyro/vel"
+        self.cmd_twist_topic = robot_topic(self.robot_id, CmdTopic.TWIST.value)
+        self.state_twist_topic = robot_topic(self.robot_id, StateTopic.TWIST.value)
+        self.gyro_topic = robot_topic(self.robot_id, SensorTopic.GYRO_VEL.value)
         
         # State tracking - use Tide models
         self.current_twist = Twist2D(
