@@ -7,3 +7,9 @@ nodes:
   - type: nodes.drivetrain.DrivebaseNode
     params:
       robot_id: cash
+  
+  # IMU sensor node
+  - type: nodes.imu_node.IMUNode
+    params:
+      robot_id: cash
+      update_rate: 60.0  # Hz

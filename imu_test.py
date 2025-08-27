@@ -40,7 +40,7 @@ while True:
     print(f"Magnetometer (microteslas): {sensor.magnetic}")
     print(f"Gyroscope (rad/sec): {sensor.gyro}")
     print(f"Euler angle: {sensor.euler}")
-    print(f"Quaternion: {sensor.quaternion}")
+    print(f"Quaternion: {sensor.quaternion}") # outputs (0.02935791015625, 0.964599609375, 0.26214599609375, 0.0)
     print(f"Linear acceleration (m/s^2): {sensor.linear_acceleration}")
     print(f"Gravity (m/s^2): {sensor.gravity}")
     print()

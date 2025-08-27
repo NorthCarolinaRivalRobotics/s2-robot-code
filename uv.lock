@@ -785,6 +785,7 @@ laptop = [
 robot = [
     { name = "adafruit-circuitpython-bno055" },
     { name = "moteus-pi3hat" },
+    { name = "rpi-gpio" },
 ]
 
 [package.metadata]
@@ -792,9 +793,16 @@ requires-dist = [
     { name = "adafruit-circuitpython-bno055", marker = "extra == 'robot'", specifier = ">=5.4.20" },
     { name = "moteus-pi3hat", marker = "extra == 'robot'", specifier = ">=0.3.31" },
     { name = "pygame", marker = "extra == 'laptop'", specifier = ">=2.6.1" },
-    { name = "tide-sdk", specifier = ">=0.1.8" },
+    { name = "rpi-gpio", marker = "extra == 'robot'", specifier = ">=0.7.1" },
+    { name = "tide-sdk", specifier = ">=0.1.11" },
 ]
 provides-extras = ["laptop", "robot"]
+
+[[package]]
+name = "rpi-gpio"
+version = "0.7.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c4/0f/10b524a12b3445af1c607c27b2f5ed122ef55756e29942900e5c950735f2/RPi.GPIO-0.7.1.tar.gz", hash = "sha256:cd61c4b03c37b62bba4a5acfea9862749c33c618e0295e7e90aa4713fb373b70", size = 29090, upload-time = "2022-02-06T15:15:06.022Z" }
 
 [[package]]
 name = "scipy"
@@ -869,7 +877,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/0c/d7/5d2f861155e9749f9
 
 [[package]]
 name = "tide-sdk"
-version = "0.1.8"
+version = "0.1.11"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cbor2" },
@@ -884,9 +892,9 @@ dependencies = [
     { name = "rerun-sdk" },
     { name = "rich" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/6f/3d/feb265c097461ddb6d572e4432ecfcee55cd6a337e65b7dbeb54a1f0a74b/tide_sdk-0.1.8.tar.gz", hash = "sha256:a38956c672a366031611c0e17f4bf3053136ef6ca8850f0f6077f411313b1137", size = 30230, upload-time = "2025-08-23T18:14:12.651Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/57/6a/5827ddb6ed214d8d3a506362281e817d9423a1d6f63751e4f271fad21265/tide_sdk-0.1.11.tar.gz", hash = "sha256:2daafb06b0d55beca29b1a8f4cf781f9ddc8ef38c853abcaf3bf979850d13764", size = 30522, upload-time = "2025-08-27T00:29:08.204Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a3/f5/16fc7ec97695486adfa02b00c14107bf4477993abe03b2592cdf7d001719/tide_sdk-0.1.8-py3-none-any.whl", hash = "sha256:7e4c310e9506308f2be3c4171f120744af16d15c0548679dc89d122c203755b7", size = 60166, upload-time = "2025-08-23T18:14:11.157Z" },
+    { url = "https://files.pythonhosted.org/packages/aa/27/fc5fa362af2c4c642d388e14642fd70894ad4209dad1ef1d8a4e624e309b/tide_sdk-0.1.11-py3-none-any.whl", hash = "sha256:cfa7ccd0b67464d7776d1b6d9954e3679390ed88011af91a2fae324b84a115c3", size = 60462, upload-time = "2025-08-27T00:29:06.687Z" },
 ]
 
 [[package]]
