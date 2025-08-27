@@ -8,5 +8,5 @@ nodes:
       robot_id: "cash"
       update_rate: 30.0  # Hz
       max_linear_speed: 1.0  # Maximum linear velocity (m/s)
-      max_angular_speed: 1.0  # Maximum angular velocity (rad/s)
+      max_angular_speed: 2.0  # Maximum angular velocity (rad/s)
       deadzone: 0.05  # Controller deadzone
