@@ -56,6 +56,7 @@ class StandaloneDriveController:
         }
         self.imu_angular_velocity = None
         self.last_command_time = 0.0
+        self._pending_command = None
         
         # Zenoh session
         self.session = None
@@ -63,8 +64,7 @@ class StandaloneDriveController:
         self.gyro_subscriber = None
         self.state_publisher = None
         
-        # Control loop task
-        self._control_task = None
+        # Control loop state
         self._running = False
         
     async def initialize(self):
@@ -160,8 +160,9 @@ class StandaloneDriveController:
             # Update command time
             self.last_command_time = time.time()
             
-            # Schedule drive command
-            asyncio.create_task(self._execute_drive_command(linear_x, linear_y, angular_z))
+            # Execute drive command directly in callback thread
+            # We'll handle this synchronously to avoid task scheduling issues
+            self._schedule_drive_command(linear_x, linear_y, angular_z)
             
         except (cbor2.CBORDecodeError, KeyError, ValueError) as e:
             logger.error(f"Error parsing twist command: {e}, payload type: {type(sample.payload)}")
@@ -180,6 +181,15 @@ class StandaloneDriveController:
             logger.debug(f"IMU angular velocity: {self.imu_angular_velocity}")
         except (cbor2.CBORDecodeError, KeyError) as e:
             logger.error(f"Error parsing IMU data: {e}, payload type: {type(sample.payload)}")
+    
+    def _schedule_drive_command(self, linear_x, linear_y, angular_z):
+        """Schedule drive command to be executed in the main loop."""
+        self._pending_command = {
+            'linear_x': linear_x,
+            'linear_y': linear_y,
+            'angular_z': angular_z,
+            'timestamp': time.time()
+        }
     
     async def _execute_drive_command(self, linear_x, linear_y, angular_z):
         """Execute drive command and update state."""
@@ -254,8 +264,16 @@ class StandaloneDriveController:
                 step_count += 1
                 current_time = time.time()
                 
+                # Process any pending drive commands
+                if self._pending_command is not None:
+                    cmd = self._pending_command
+                    self._pending_command = None  # Clear it first
+                    await self._execute_drive_command(
+                        cmd['linear_x'], cmd['linear_y'], cmd['angular_z']
+                    )
+                
                 # Check for idle state and query velocities
-                if current_time - self.last_command_time > 0.5:  # 500ms timeout
+                elif current_time - self.last_command_time > 0.5:  # 500ms timeout
                     if step_count % 10 == 0:  # Every ~3.33 seconds at 30Hz
                         await self._query_idle_velocities()
                 
@@ -294,7 +312,8 @@ class StandaloneDriveController:
         await self.initialize()
         
         self._running = True
-        self._control_task = asyncio.create_task(self._control_loop())
+        # Don't use create_task to avoid async issues - run control loop directly
+        # We'll handle this differently in main()
         
         logger.info("Standalone drive controller started successfully")
     
@@ -304,13 +323,7 @@ class StandaloneDriveController:
         
         self._running = False
         
-        # Cancel control loop
-        if self._control_task:
-            self._control_task.cancel()
-            try:
-                await self._control_task
-            except asyncio.CancelledError:
-                pass
+        # Control loop will stop on next iteration when _running becomes False
         
         # Stop motors
         if self.drive:
@@ -338,10 +351,9 @@ async def main():
     try:
         await controller.start()
         
-        # Run until interrupted
+        # Run the control loop directly - no create_task needed
         logger.info("Drive controller running. Press Ctrl+C to stop.")
-        while True:
-            await asyncio.sleep(1.0)
+        await controller._control_loop()
             
     except KeyboardInterrupt:
         logger.info("Received interrupt signal")
