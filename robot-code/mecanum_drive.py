@@ -44,6 +44,9 @@ class MecanumDrive:
             3: -1,
             4: -1
         }
+        
+        # Store previous motor velocities for fallback
+        self.previous_motor_velocities = {motor_id: 0.0 for motor_id in motor_ids}
 
         # Setup transport
         if servo_bus_map is None:
@@ -72,6 +75,20 @@ class MecanumDrive:
             Motor speed in revolutions per second
         """
         return (wheel_speed_ms / self.WHEEL_CIRCUMFERENCE) * self.GEAR_RATIO
+    
+    def motor_speed_to_wheel_speed(self, motor_speed_revs, motor_id):
+        """
+        Convert motor speed in rev/s to wheel speed in m/s.
+        
+        Args:
+            motor_speed_revs: Motor speed in revolutions per second
+            motor_id: Motor ID to apply correct direction
+            
+        Returns:
+            Wheel speed in meters per second
+        """
+        direction = self.motor_directons.get(motor_id, 1)
+        return (motor_speed_revs / self.GEAR_RATIO) * self.WHEEL_CIRCUMFERENCE * direction
         
     async def set_front_left_velocity(self, velocity_ms):
         """Set front left motor velocity in m/s."""
@@ -133,25 +150,29 @@ class MecanumDrive:
             self.motors[self.front_left_id].make_position(
                 position=math.nan,
                 velocity=self.wheel_speed_to_motor_speed(front_left_ms) * self.motor_directons[self.front_left_id],
-                maximum_torque=0.5,
+                maximum_torque=1.0,
+                maximum_acceleration=1.0,
                 query=False
             ),
             self.motors[self.front_right_id].make_position(
                 position=math.nan,
                 velocity=self.wheel_speed_to_motor_speed(front_right_ms) * self.motor_directons[self.front_right_id],
-                maximum_torque=0.5,
+                maximum_torque=1.0,
+                maximum_acceleration=1.0,
                 query=False
             ),
             self.motors[self.back_left_id].make_position(
                 position=math.nan,
                 velocity=self.wheel_speed_to_motor_speed(back_left_ms) * self.motor_directons[self.back_left_id],
-                maximum_torque=0.5,
+                maximum_torque=1.0,
+                maximum_acceleration=1.0,
                 query=False
             ),
             self.motors[self.back_right_id].make_position(
                 position=math.nan,
                 velocity=self.wheel_speed_to_motor_speed(back_right_ms) * self.motor_directons[self.back_right_id],
-                maximum_torque=0.5,
+                maximum_torque=1.0,
+                maximum_acceleration=1.0,
                 query=False
             )
         ]
@@ -164,6 +185,63 @@ class MecanumDrive:
     async def set_stops(self):
         for motor in self.motors.values():
             await motor.set_stop()
+    
+    async def get_wheel_velocities(self):
+        """
+        Read current wheel velocities from all motors.
+        
+        Returns:
+            dict: Dictionary with motor IDs as keys and wheel speeds in m/s as values
+                 Format: {front_left_id: speed, front_right_id: speed, back_left_id: speed, back_right_id: speed}
+        """
+        # Create query commands for all motors
+        commands = [
+            self.motors[motor_id].make_position(
+                position=math.nan,
+                velocity=0.0,  # No movement, just query
+                maximum_torque=0.0,  # No torque while querying
+                query=True  # Enable query to get feedback
+            ) for motor_id in self.motor_ids
+        ]
+        
+        # Execute the commands and get results
+        results = await self.transport.cycle(commands)
+        
+        # Parse the results and convert to wheel speeds
+        wheel_velocities = {}
+        for result in results:
+            if result.id in self.motor_ids:
+                try:
+                    motor_speed = result.values[moteus.Register.VELOCITY]
+                    wheel_speed = self.motor_speed_to_wheel_speed(motor_speed, result.id)
+                    wheel_velocities[result.id] = wheel_speed
+                    # Update previous velocity for fallback
+                    self.previous_motor_velocities[result.id] = motor_speed
+                except (KeyError, AttributeError):
+                    # Use previous velocity if current read fails
+                    print(f"Failed to read velocity for motor {result.id}, using previous value")
+                    wheel_speed = self.motor_speed_to_wheel_speed(
+                        self.previous_motor_velocities[result.id], result.id
+                    )
+                    wheel_velocities[result.id] = wheel_speed
+        
+        return wheel_velocities
+    
+    async def get_wheel_velocities_named(self):
+        """
+        Read current wheel velocities with named keys.
+        
+        Returns:
+            dict: Dictionary with named keys and wheel speeds in m/s
+                 Format: {'front_left': speed, 'front_right': speed, 'back_left': speed, 'back_right': speed}
+        """
+        velocities = await self.get_wheel_velocities()
+        return {
+            'front_left': velocities.get(self.front_left_id, 0.0),
+            'front_right': velocities.get(self.front_right_id, 0.0),
+            'back_left': velocities.get(self.back_left_id, 0.0),
+            'back_right': velocities.get(self.back_right_id, 0.0)
+        }
             
     async def drive(self, linear_x, linear_y, angular_z):
         front_left_speed = linear_x + linear_y + angular_z
@@ -175,22 +253,51 @@ class MecanumDrive:
 async def main():
     """Example of how to use the MecanumDrive class."""
     
-    # Create mecanum drive with default motor IDs [1, 2, 3, 4]
+    # Create mecanum drive with default motor IDs [4, 1, 3, 2] (front_left, front_right, back_left, back_right)
     drive = MecanumDrive()
     await drive.set_stops()
     
     try:
-        # Example: Move forward at 0.5 m/s
+        # Example: Move forward at 0.5 m/s and read velocities
         start_time = time.time()
-        while time.time() - start_time < 1.0:
+        while time.time() - start_time < 2.0:
             print("Moving forward...")
             await drive.set_all_velocities(0.5, 0.5, 0.5, 0.5)
-            await asyncio.sleep(0.005)
+            
+            # Read and display actual wheel velocities
+            velocities = await drive.get_wheel_velocities_named()
+            print(f"Wheel velocities (m/s): FL={velocities['front_left']:.3f}, "
+                  f"FR={velocities['front_right']:.3f}, "
+                  f"BL={velocities['back_left']:.3f}, "
+                  f"BR={velocities['back_right']:.3f}")
+            
+            await asyncio.sleep(0.1)  # Slower loop for readable output
 
+        # Example: Strafe right and read velocities
+        print("\nStrafing right...")
+        start_time = time.time()
+        while time.time() - start_time < 2.0:
+            await drive.set_all_velocities(-0.3, 0.3, 0.3, -0.3)  # Strafe right pattern
+            
+            velocities = await drive.get_wheel_velocities_named()
+            print(f"Strafe velocities (m/s): FL={velocities['front_left']:.3f}, "
+                  f"FR={velocities['front_right']:.3f}, "
+                  f"BL={velocities['back_left']:.3f}, "
+                  f"BR={velocities['back_right']:.3f}")
+            
+            await asyncio.sleep(0.1)
         
-        # Stop
-        print("Stopping...")
+        # Stop and verify all wheels stop
+        print("\nStopping...")
         await drive.stop_all_motors()
+        
+        # Check that wheels have stopped
+        await asyncio.sleep(0.5)  # Wait for motors to stop
+        final_velocities = await drive.get_wheel_velocities_named()
+        print(f"Final velocities (m/s): FL={final_velocities['front_left']:.3f}, "
+              f"FR={final_velocities['front_right']:.3f}, "
+              f"BL={final_velocities['back_left']:.3f}, "
+              f"BR={final_velocities['back_right']:.3f}")
         
     except KeyboardInterrupt:
         print("Emergency stop!")
