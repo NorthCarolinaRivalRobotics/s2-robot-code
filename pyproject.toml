@@ -16,5 +16,4 @@ robot = [
     "moteus-pi3hat>=0.3.31",
     "adafruit-circuitpython-bno055>=5.4.20",
     "RPi.GPIO>=0.7.1",
-    "zenoh>=0.11.0",
 ]
