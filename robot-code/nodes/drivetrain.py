@@ -105,10 +105,11 @@ class DrivebaseNode(BaseNode):
         
         try:
 
-            angular_velocity = self.get_imu_angular_velocity()
-            print(f"IMU angular velocity: {angular_velocity}")
+            pitch_velocity = self.get_imu_angular_velocity()['y']
+            anti_tip_feedback = -pitch_velocity * 1.0 
+            print(f"IMU angular velocity: {pitch_velocity}")
             # Extract linear velocities
-            linear_x = twist["linear"]["x"]
+            linear_x = twist["linear"]["x"] + anti_tip_feedback
             linear_y = twist["linear"]["y"]
             
             # Handle angular velocity - it might be a float or an object with z field
