@@ -151,28 +151,24 @@ class MecanumDrive:
                 position=math.nan,
                 velocity=self.wheel_speed_to_motor_speed(front_left_ms) * self.motor_directons[self.front_left_id],
                 maximum_torque=1.0,
-                maximum_acceleration=1.0,
                 query=False
             ),
             self.motors[self.front_right_id].make_position(
                 position=math.nan,
                 velocity=self.wheel_speed_to_motor_speed(front_right_ms) * self.motor_directons[self.front_right_id],
                 maximum_torque=1.0,
-                maximum_acceleration=1.0,
                 query=False
             ),
             self.motors[self.back_left_id].make_position(
                 position=math.nan,
                 velocity=self.wheel_speed_to_motor_speed(back_left_ms) * self.motor_directons[self.back_left_id],
                 maximum_torque=1.0,
-                maximum_acceleration=1.0,
                 query=False
             ),
             self.motors[self.back_right_id].make_position(
                 position=math.nan,
                 velocity=self.wheel_speed_to_motor_speed(back_right_ms) * self.motor_directons[self.back_right_id],
                 maximum_torque=1.0,
-                maximum_acceleration=1.0,
                 query=False
             )
         ]
