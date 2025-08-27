@@ -49,9 +49,9 @@ class StandaloneDriveController:
         self._initialization_started = False
         
         # Topic names
-        self.cmd_twist_topic = robot_topic(self.robot_id, CmdTopic.TWIST.value)
-        self.state_twist_topic = robot_topic(self.robot_id, StateTopic.TWIST.value)
-        self.gyro_topic = robot_topic(self.robot_id, "sensor/imu/gyro")
+        self.cmd_twist_topic = robot_topic(self.robot_id, CmdTopic.TWIST.value).strip('/')
+        self.state_twist_topic = robot_topic(self.robot_id, StateTopic.TWIST.value).strip('/')
+        self.gyro_topic = robot_topic(self.robot_id, "sensor/imu/gyro").strip('/')
         
         # State tracking - use Tide models
         self.current_twist = Twist2D(
