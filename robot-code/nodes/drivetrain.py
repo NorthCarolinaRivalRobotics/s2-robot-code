@@ -7,7 +7,7 @@ Integrates the existing DriveBase class with Tide's node system
 
 from tide.core.node import BaseNode
 from tide import CmdTopic
-from tide.models import Twist2D
+from tide.models import Twist2D, Vector3
 from tide.namespaces import robot_topic
 import logging
 import asyncio
@@ -38,10 +38,18 @@ class DrivebaseNode(BaseNode):
         self._initialization_started = False
         self._initialization_lock = asyncio.Lock()
         
+        # Store latest IMU angular velocity
+        self.imu_angular_velocity = None
+        
         # Subscribe to twist commands using proper Tide namespacing
         twist_topic = robot_topic(self.ROBOT_ID, CmdTopic.TWIST.value)
         self.subscribe(twist_topic, self.on_cmd_vel)
         logger.info(f"Subscribed to {twist_topic}")
+        
+        # Subscribe to IMU gyroscope data
+        gyro_topic = robot_topic(self.ROBOT_ID, "sensor/gyro/vel")
+        self.subscribe(gyro_topic, self.on_imu_angular_velocity)
+        logger.info(f"Subscribed to IMU gyro data: {gyro_topic}")
     
     async def _ensure_initialized(self):
         """Ensure drivebase is initialized, initializing if necessary."""
@@ -67,6 +75,27 @@ class DrivebaseNode(BaseNode):
                 self.drivebase = None
                 self._initialization_started = False
     
+    def on_imu_angular_velocity(self, sample):
+        """
+        Handle incoming IMU angular velocity data
+        """
+        try:
+            # Parse the Vector3 angular velocity data
+            angular_vel = sample
+            
+            # Store the latest angular velocity (we're primarily interested in z-axis rotation)
+            self.imu_angular_velocity = {
+                'x': angular_vel.get('x', 0.0),
+                'y': angular_vel.get('y', 0.0),  
+                'z': angular_vel.get('z', 0.0)
+            }
+            
+            logger.debug(f"IMU angular velocity: x={self.imu_angular_velocity['x']:.3f}, "
+                        f"y={self.imu_angular_velocity['y']:.3f}, z={self.imu_angular_velocity['z']:.3f}")
+                        
+        except (KeyError, TypeError, ValueError) as e:
+            logger.error(f"Error parsing IMU angular velocity: {e}, sample: {sample}")
+    
     def on_cmd_vel(self, sample):
         """
         Handle incoming velocity commands
@@ -75,6 +104,9 @@ class DrivebaseNode(BaseNode):
         twist = sample
         
         try:
+
+            angular_velocity = self.get_imu_angular_velocity()
+            print(f"IMU angular velocity: {angular_velocity}")
             # Extract linear velocities
             linear_x = twist["linear"]["x"]
             linear_y = twist["linear"]["y"]
@@ -108,6 +140,15 @@ class DrivebaseNode(BaseNode):
         except Exception as e:
             logger.error(f"Error scheduling drive command: {e}")
     
+    def get_imu_angular_velocity(self):
+        """
+        Get the latest IMU angular velocity data.
+        
+        Returns:
+            dict: Angular velocity with 'x', 'y', 'z' components, or None if no data available
+        """
+        return self.imu_angular_velocity
+    
     async def _drive_async(self, linear_x, linear_y, angular_z):
         """Helper method to handle async drive commands."""
         try:
@@ -122,9 +163,20 @@ class DrivebaseNode(BaseNode):
     def step(self):
         """
         Main step function - called periodically
-        For the drivebase, we don't need to do anything here as it's reactive
+        Logs IMU data when available for monitoring
         """
-        pass
+        # Log IMU angular velocity periodically for monitoring
+        if hasattr(self, '_step_count'):
+            self._step_count += 1
+        else:
+            self._step_count = 1
+            
+        # Log every 90 steps (approximately every 3 seconds at 30Hz)
+        if self._step_count % 90 == 0 and self.imu_angular_velocity is not None:
+            logger.info(f"IMU angular velocity available - "
+                       f"x: {self.imu_angular_velocity['x']:.3f}, "
+                       f"y: {self.imu_angular_velocity['y']:.3f}, "
+                       f"z: {self.imu_angular_velocity['z']:.3f} rad/s")
     
     def cleanup(self):
         """
