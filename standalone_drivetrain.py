@@ -40,9 +40,9 @@ class StandaloneDriveController:
         self._initialization_started = False
         
         # Topic names
-        self.cmd_twist_topic = f"/{robot_id}/cmd/twist"
-        self.state_twist_topic = f"/{robot_id}/state/twist"
-        self.gyro_topic = f"/{robot_id}/sensor/gyro/vel"
+        self.cmd_twist_topic = f"{robot_id}/cmd/twist"
+        self.state_twist_topic = f"{robot_id}/state/twist"
+        self.gyro_topic = f"{robot_id}/sensor/gyro/vel"
         
         # State tracking
         self.current_twist = {
