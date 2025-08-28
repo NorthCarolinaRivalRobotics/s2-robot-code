@@ -132,46 +132,45 @@ async def main():
                 reference_w = 0.0
             
             # Execute drive command if we have velocities
-            if abs(reference_vx) > 0.001 or abs(reference_vy) > 0.001 or abs(reference_w) > 0.001:
-                try:
-                    # Execute drive command with velocity query
-                    wheel_velocities = await drive.drive(
-                        reference_vx, reference_vy, reference_w, query_velocities=True
-                    )
-                    
-                    # Publish state if we got wheel velocities back
-                    if wheel_velocities:
-                        # Calculate robot velocities from wheel speeds (basic mecanum kinematics)
-                        fl = wheel_velocities.get('front_left', 0.0)
-                        fr = wheel_velocities.get('front_right', 0.0)
-                        bl = wheel_velocities.get('back_left', 0.0)
-                        br = wheel_velocities.get('back_right', 0.0)
-                        
-                        # Basic mecanum math
-                        actual_vx = (fl + fr + bl + br) / 4.0
-                        actual_vy = (-fl + fr + bl - br) / 4.0
-                        
-                        # Use IMU angular velocity if available, otherwise estimate from wheels
-                        if imu_angular_velocity:
-                            actual_w = imu_angular_velocity.z
-                        else:
-                            actual_w = (-fl - fr + bl + br) / (4.0 * 0.3)  # Assume 30cm wheelbase
-                        
-                        # Publish state using Tide serialization
-                        current_twist = Twist2D(
-                            linear=Vector2(x=actual_vx, y=actual_vy),
-                            angular=actual_w
-                        )
-                        payload = to_zenoh_value(current_twist)
-                        state_twist_pub.put(payload)
-                        
-                        if step_count % 60 == 0:  # Log every 2 seconds at 30Hz
-                            print(f"Driving: cmd=({reference_vx:.2f}, {reference_vy:.2f}, {reference_w:.2f}), "
-                                  f"actual=({actual_vx:.2f}, {actual_vy:.2f}, {actual_w:.2f})")
+            try:
+                # Execute drive command with velocity query
+                wheel_velocities = await drive.drive(
+                    reference_vx, reference_vy, reference_w, query_velocities=True
+                )
                 
-                except Exception as e:
-                    print(f"Error executing drive command: {e}")
+                # Publish state if we got wheel velocities back
+                if wheel_velocities:
+                    # Calculate robot velocities from wheel speeds (basic mecanum kinematics)
+                    fl = wheel_velocities.get('front_left', 0.0)
+                    fr = wheel_velocities.get('front_right', 0.0)
+                    bl = wheel_velocities.get('back_left', 0.0)
+                    br = wheel_velocities.get('back_right', 0.0)
+                    
+                    # Basic mecanum math
+                    actual_vx = (fl + fr + bl + br) / 4.0
+                    actual_vy = (-fl + fr + bl - br) / 4.0
+                    
+                    # Use IMU angular velocity if available, otherwise estimate from wheels
+                    if imu_angular_velocity:
+                        actual_w = imu_angular_velocity.z
+                    else:
+                        actual_w = (-fl - fr + bl + br) / (4.0 * 0.3)  # Assume 30cm wheelbase
+                    
+                    # Publish state using Tide serialization
+                    current_twist = Twist2D(
+                        linear=Vector2(x=actual_vx, y=actual_vy),
+                        angular=actual_w
+                    )
+                    payload = to_zenoh_value(current_twist)
+                    state_twist_pub.put(payload)
+                    
+                    if step_count % 60 == 0:  # Log every 2 seconds at 30Hz
+                        print(f"Driving: cmd=({reference_vx:.2f}, {reference_vy:.2f}, {reference_w:.2f}), "
+                                f"actual=({actual_vx:.2f}, {actual_vy:.2f}, {actual_w:.2f})")
             
+            except Exception as e:
+                print(f"Error executing drive command: {e}")
+        
             # Periodic status logging
             if step_count % 900 == 0:  # Every 30 seconds
                 print(f"Controller running - step {step_count}, last_cmd: {time.monotonic() - last_recv:.1f}s ago")
