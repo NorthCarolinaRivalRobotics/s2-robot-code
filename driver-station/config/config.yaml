@@ -10,3 +10,9 @@ nodes:
       max_linear_speed: 3.0  # Maximum linear velocity (m/s)
       max_angular_speed: 2.0  # Maximum angular velocity (rad/s)
       deadzone: 0.05  # Controller deadzone
+
+  # Robot Odometry Node - subscribes to velocity twists and IMU data
+  - type: nodes.robot_odometry.RobotOdometryNode
+    params:
+      robot_id: "cash"
+      update_rate: 30.0  # Hz
