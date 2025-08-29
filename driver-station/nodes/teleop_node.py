@@ -5,12 +5,16 @@ Simple teleop node for PS5 controller input to robot movement.
 
 import pygame
 import os
+import time
 import logging
+import math
+import numpy as np
 
 from tide.core.node import BaseNode
 from tide.namespaces import robot_topic
 from tide import CmdTopic
 from tide.models import Twist2D, Vector2
+from tide.core.geometry import SE2, SO2
 from tide.models.serialization import to_zenoh_value
 
 
@@ -32,6 +36,7 @@ class TeleopNode(BaseNode):
         self.max_linear_speed = 1.0  # m/s
         self.max_angular_speed = 1.0  # rad/s
         self.deadzone = 0.05
+        self.field_relative = True  # Convert joystick to field-relative driving
         
         # Override from config
         if config:
@@ -40,12 +45,18 @@ class TeleopNode(BaseNode):
             self.max_linear_speed = config.get("max_linear_speed", self.max_linear_speed)
             self.max_angular_speed = config.get("max_angular_speed", self.max_angular_speed)
             self.deadzone = config.get("deadzone", self.deadzone)
+            self.field_relative = config.get("field_relative", self.field_relative)
         
         # Set update rate
         self.hz = self.update_rate
         
         # Topic names
         self.twist_topic = robot_topic(self.robot_id, CmdTopic.TWIST.value)
+        self.odom_topic = robot_topic(self.robot_id, "state/pose2d")
+
+        # Odometry subscription for field-relative driving
+        self.current_theta = 0.0
+        self.subscribe(self.odom_topic, self._on_odometry)
         
         # Initialize logging
         self.logger = logging.getLogger(f"Teleop_{self.robot_id}")
@@ -55,11 +66,27 @@ class TeleopNode(BaseNode):
         
         # State management
         self.seq = 0
+        self._last_time = None
         
         self.logger.info(f"Teleop Node started for robot {self.robot_id}")
         self.logger.info("Controls:")
         self.logger.info("  Left stick: Linear movement (X/Y)")
         self.logger.info("  Right stick X: Angular rotation")
+
+    def _on_odometry(self, sample):
+        """Update the latest robot yaw from odometry (radians)."""
+        try:
+            # Support common shapes: {x,y,theta} or nested {pose:{x,y,theta}}
+            if isinstance(sample, dict) and all(k in sample for k in ("x", "y", "theta")):
+                theta = float(sample["theta"])  # type: ignore[index]
+            elif isinstance(sample, dict) and "pose" in sample:
+                theta = float(sample["pose"]["theta"])  # type: ignore[index]
+            else:
+                return
+            # Normalize angle to [-pi, pi] for stability
+            self.current_theta = math.atan2(math.sin(theta), math.cos(theta))
+        except Exception as e:
+            self.logger.debug(f"Failed to parse odometry sample: {e}")
         
     def _init_controller(self):
         """Initialize PS5 controller."""
@@ -137,13 +164,39 @@ class TeleopNode(BaseNode):
             # Read controller inputs
             inputs = self._read_controller_inputs()
             
-            # Get twist commands from controller
+            # Get twist commands from controller (joystick frame)
             linear_x = inputs['linear_x']
             linear_y = -inputs['linear_y']
             angular_z = -inputs['angular_z']
-            
-            # Create and publish twist message
+
+            if self.field_relative:
+                # Convert field-relative commanded velocity into robot-frame twist using SE2
+                now = time.time()
+                if self._last_time is None:
+                    dt = 1.0 / max(self.update_rate, 1e-6)
+                else:
+                    dt = max(now - self._last_time, 1e-6)
+                self._last_time = now
+
+                print(f"dt: {dt}")
+
+                try:
+                    twist_vec = np.array([linear_x, linear_y, angular_z], dtype=float)
+                    t_cmd = SE2.exp(twist_vec)
+                    r_inv = SE2.exp(np.array([0.0, 0.0, -self.current_theta], dtype=float)).inverse()
+                    t_body = r_inv * t_cmd
+                    t_body = SE2(translation=t_body.translation, rotation=SO2(theta=angular_z))
+                    t_twist=  t_body.log()
+                    linear_x = t_twist[0]
+                    linear_y = t_twist[1]
+                    angular_z = t_twist[2]
+        
+                except Exception as map_e:
+                    self.logger.debug(f"Field-relative mapping failed; using raw inputs: {map_e}")
+
+            # Create and publish twist message (robot-frame)
             twist_msg = self._create_twist_message(linear_x, linear_y, angular_z)
+            self.logger.info(f"twist_msg: {twist_msg}")
             self.put(self.twist_topic, to_zenoh_value(twist_msg))
             
             # Log status periodically

@@ -10,6 +10,7 @@ nodes:
       max_linear_speed: 3.0  # Maximum linear velocity (m/s)
       max_angular_speed: 2.0  # Maximum angular velocity (rad/s)
       deadzone: 0.05  # Controller deadzone
+      field_relative: true  # Use odometry to drive in field frame
 
   # Robot Odometry Node - subscribes to velocity twists and IMU data
   - type: nodes.robot_odometry.RobotOdometryNode
