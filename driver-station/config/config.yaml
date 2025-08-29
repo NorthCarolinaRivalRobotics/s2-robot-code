@@ -16,3 +16,14 @@ nodes:
     params:
       robot_id: "cash"
       update_rate: 30.0  # Hz
+
+  # Rerun Visualization Node - subscribes to odometry/IMU and renders a 3D cube
+  - type: nodes.rerun_viz.RerunVizNode
+    params:
+      robot_id: "cash"
+      update_rate: 30.0  # Hz
+      # Subscribe to Pose2D computed by the odometry node
+      odom_topic: "/cash/state/pose2d"
+      twist_topic: "/cash/state/twist"
+      imu_quat_topic: "/cash/sensor/imu/quat"
+      integrate_twist_if_needed: false

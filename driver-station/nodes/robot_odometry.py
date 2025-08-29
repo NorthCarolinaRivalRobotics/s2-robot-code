@@ -11,7 +11,9 @@ import numpy as np
 from typing import Optional, Tuple
 
 from tide.core.node import BaseNode
-from tide.core.geometry import SE2
+from tide.core.geometry import SE2, SO2
+from tide.models import Pose2D
+from tide.models.serialization import to_zenoh_value
 
 
 def robot_topic(robot_id: str, topic: str) -> str:
@@ -46,6 +48,7 @@ class RobotOdometryNode(BaseNode):
         self.state_twist_topic = robot_topic(self.robot_id, "state/twist")
         self.imu_quat_topic = robot_topic(self.robot_id, "sensor/imu/quat")
         self.gyro_topic = robot_topic(self.robot_id, "sensor/gyro/vel")
+        self.pose_topic = robot_topic(self.robot_id, "state/pose2d")
         
         # Subscribe to topics
         self.subscribe(self.state_twist_topic, self.on_state_twist)
@@ -63,6 +66,11 @@ class RobotOdometryNode(BaseNode):
         self.current_gyro = None
         self.last_yaw = None
         self.yaw_initialized = False
+        
+        # Yaw rezeroing state
+        self.initial_yaw_offset = None
+        self.yaw_measurement_count = 0
+        self.yaw_rezeroed = False
         
         logger.info(f"Robot Odometry Node initialized for robot {self.robot_id}")
         logger.info(f"Subscribed to state twist: {self.state_twist_topic}")
@@ -110,7 +118,28 @@ class RobotOdometryNode(BaseNode):
             }
             
             # Convert quaternion to yaw angle
-            yaw = self._quaternion_to_yaw(sample['w'], sample['x'], sample['y'], sample['z'])
+            raw_yaw = self._quaternion_to_yaw(sample['w'], sample['x'], sample['y'], sample['z'])
+            
+            # Handle yaw rezeroing on first/second measurements
+            self.yaw_measurement_count += 1
+            
+            if not self.yaw_rezeroed:
+                if self.yaw_measurement_count == 1:
+                    # Store first measurement as potential offset
+                    self.initial_yaw_offset = raw_yaw
+                    logger.info(f"First yaw measurement captured: {math.degrees(raw_yaw):.1f}°")
+                elif self.yaw_measurement_count == 2:
+                    # Use second measurement to confirm offset (assuming robot is stationary)
+                    # Average the first two measurements for better accuracy
+                    self.initial_yaw_offset = (self.initial_yaw_offset + raw_yaw) / 2.0
+                    self.yaw_rezeroed = True
+                    logger.info(f"Yaw rezeroed! Initial offset: {math.degrees(self.initial_yaw_offset):.1f}°")
+            
+            # Apply yaw offset if rezeroing is complete
+            if self.yaw_rezeroed:
+                yaw = self._normalize_angle(raw_yaw - self.initial_yaw_offset)
+            else:
+                yaw = raw_yaw
             
             if not self.yaw_initialized:
                 self.last_yaw = yaw
@@ -197,15 +226,27 @@ class RobotOdometryNode(BaseNode):
             
             # Update the pose by multiplication (composition)
             self.current_pose = self.current_pose * pose_delta
-            
+            if self.yaw_initialized and self.yaw_rezeroed:
+                self.current_pose = SE2(SO2(self.last_yaw), self.current_pose.translation)
+
             # Extract pose components for logging
             pose_matrix = self.current_pose.as_matrix()
             x = pose_matrix[0, 2]
             y = pose_matrix[1, 2]
             theta = math.atan2(pose_matrix[1, 0], pose_matrix[0, 0])
-            
+
+            # Publish Pose2D with timestamp
+            ts = time.time()
+            pose_msg = Pose2D(timestamp=ts, x=x, y=y, theta=theta)
+            try:
+                self.put(self.pose_topic, to_zenoh_value(pose_msg))
+            except Exception as pub_e:
+                logger.error(f"Failed to publish Pose2D: {pub_e}")
+
             # Log the current pose
-            logger.info(f"Robot Pose - x: {x:.3f}m, y: {y:.3f}m, theta: {theta:.3f}rad ({math.degrees(theta):.1f}°)")
+            logger.info(
+                f"Robot Pose - x: {x:.3f}m, y: {y:.3f}m, theta: {theta:.3f}rad ({math.degrees(theta):.1f}°) -> published {self.pose_topic}"
+            )
             
             # Also log the twist components used
             logger.debug(f"Twist used - linear: ({linear_x:.3f}, {linear_y:.3f}), angular: {angular_z:.3f}, dt: {dt:.3f}")
@@ -245,6 +286,16 @@ class RobotOdometryNode(BaseNode):
         except Exception as e:
             logger.error(f"Error resetting pose: {e}")
     
+    def rezero_yaw(self):
+        """
+        Manually trigger yaw rezeroing. This will reset the yaw offset using the next IMU measurement.
+        Useful if the robot has been moved while stationary.
+        """
+        self.yaw_measurement_count = 0
+        self.yaw_rezeroed = False
+        self.initial_yaw_offset = None
+        logger.info("Yaw rezeroing triggered - will rezero on next two IMU measurements")
+    
     def step(self):
         """
         Main step function - called periodically.
@@ -263,9 +314,10 @@ class RobotOdometryNode(BaseNode):
             twist_status = "Available" if self.last_twist else "N/A"
             imu_status = "Available" if self.current_quaternion else "N/A"
             gyro_status = "Available" if self.current_gyro else "N/A"
+            yaw_status = "Rezeroed" if self.yaw_rezeroed else f"Calibrating ({self.yaw_measurement_count}/2)"
             
             logger.info(f"Odometry Status - Pose: ({x:.3f}, {y:.3f}, {math.degrees(theta):.1f}°), "
-                       f"Twist: {twist_status}, IMU: {imu_status}, Gyro: {gyro_status}")
+                       f"Twist: {twist_status}, IMU: {imu_status}, Gyro: {gyro_status}, Yaw: {yaw_status}")
     
     def cleanup(self):
         """
