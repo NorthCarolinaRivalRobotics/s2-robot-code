@@ -21,8 +21,8 @@ except ImportError:
     print("Error: tide-sdk package not found. Install with: pip install tide-sdk")
     sys.exit(1)
 
-# Add robot-code directory to path to import mecanum_drive
-sys.path.append(os.path.join(os.path.dirname(__file__), 'robot-code'))
+# Add current directory to path to import mecanum_drive
+sys.path.append(os.path.dirname(__file__))
 
 try:
     import zenoh
