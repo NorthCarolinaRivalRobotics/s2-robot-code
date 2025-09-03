@@ -5,7 +5,9 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "tide-sdk>=0.1.11",
+    "matplotlib>=3.10.6",
+    "pytest>=8.4.1",
+    "tide-sdk",
 ]
 
 [project.optional-dependencies]
@@ -17,3 +19,6 @@ robot = [
     "adafruit-circuitpython-bno055>=5.4.20",
     "RPi.GPIO>=0.7.1",
 ]
+
+[tool.uv.sources]
+tide-sdk = { git = "https://github.com/NorthCarolinaRivalRobotics/tide.git" }

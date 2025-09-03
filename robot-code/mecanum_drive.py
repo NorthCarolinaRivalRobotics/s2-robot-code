@@ -26,7 +26,7 @@ class MecanumDrive:
             servo_bus_map: Optional servo bus mapping for pi3hat
         """
         # Wheel constants for 120mm diameter, 6:1 gear ratio
-        self.WHEEL_DIAMETER = 0.109  # 109mm in meters
+        self.WHEEL_DIAMETER = 0.104  # 109mm in meters
         self.GEAR_RATIO = 100.0/29.0
         self.WHEEL_CIRCUMFERENCE = self.WHEEL_DIAMETER * math.pi
         

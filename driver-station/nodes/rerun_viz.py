@@ -61,6 +61,7 @@ class RerunVizNode(BaseNode):
         self.odom_topic = robot_topic(self.robot_id, "state/pose2d")
         self.twist_topic = robot_topic(self.robot_id, "state/twist")
         self.imu_quat_topic = robot_topic(self.robot_id, "sensor/imu/quat")
+        self.target_topic = robot_topic(self.robot_id, "ui/target_pose2d")
 
         # Whether to integrate twist if odometry is absent
         self.integrate_twist_if_needed = False
@@ -89,6 +90,8 @@ class RerunVizNode(BaseNode):
         self.subscribe(self.odom_topic, self._on_odometry)
         if self.integrate_twist_if_needed:
             self.subscribe(self.twist_topic, self._on_twist)
+        # Optional target pose for visualization
+        self.subscribe(self.target_topic, self._on_target_pose)
 
         # State for visualization
         self._last_pose = np.array([0.0, 0.0, 0.0])  # x, y, yaw
@@ -97,6 +100,7 @@ class RerunVizNode(BaseNode):
         self._imu_rotation = None  # rr.Quaternion
         self._imu_yaw = None  # float
         self._trail_points = deque(maxlen=self.trail_length)  # world-frame (x,y,0) points
+        self._target_pose = None  # np.array([x,y,yaw])
 
         # Robot geometry (in meters): 12in x 12in x 8in
         self.robot_size = (0.3048, 0.3048, 0.2032)
@@ -163,6 +167,14 @@ class RerunVizNode(BaseNode):
         except Exception as e:
             logger.error(f"Failed to parse IMU quaternion: {e}")
 
+    def _on_target_pose(self, sample):
+        try:
+            if isinstance(sample, Mapping) and all(k in sample for k in ("x", "y", "theta")):
+                x, y, yaw = float(sample["x"]), float(sample["y"]), float(sample["theta"])  # type: ignore[index]
+                self._target_pose = np.array([x, y, yaw], dtype=float)
+        except Exception as e:
+            logger.error(f"Failed to parse target pose: {e}")
+
     # ---- Main loop ----
     def step(self):
         # Use odometry pose exclusively for transform & alignment
@@ -183,6 +195,17 @@ class RerunVizNode(BaseNode):
         start_local = (0.0, 0.0, float(top_z_local))
         end_local = (float(self.heading_line_length), 0.0, float(top_z_local))
         rr.log(robot_path + "/heading", rr.LineStrips3D([[start_local, end_local]]))
+
+        # Draw target pose if available
+        if self._target_pose is not None:
+            tx, ty, tyaw = self._target_pose.tolist()
+            # Point marker at z=0
+            rr.log("world/target/point", rr.Points3D(positions=[(float(tx), float(ty), 0.0)], radii=[0.02], colors=[[255, 0, 0]]))
+            # Heading arrow as short line
+            arrow_len = max(self.heading_line_length, 0.15)
+            hx = tx + math.cos(tyaw) * arrow_len
+            hy = ty + math.sin(tyaw) * arrow_len
+            rr.log("world/target/heading", rr.LineStrips3D([[(float(tx), float(ty), 0.01), (float(hx), float(hy), 0.01)]]))
 
     def cleanup(self):
         logger.info("RerunVizNode shutting down")
