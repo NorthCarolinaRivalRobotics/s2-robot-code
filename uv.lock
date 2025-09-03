@@ -1061,7 +1061,7 @@ requires-dist = [
     { name = "pygame", marker = "extra == 'laptop'", specifier = ">=2.6.1" },
     { name = "pytest", specifier = ">=8.4.1" },
     { name = "rpi-gpio", marker = "extra == 'robot'", specifier = ">=0.7.1" },
-    { name = "tide-sdk", git = "https://github.com/NorthCarolinaRivalRobotics/tide.git" },
+    { name = "tide-sdk", specifier = ">=0.1.12" },
 ]
 provides-extras = ["laptop", "robot"]
 
@@ -1154,7 +1154,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/0c/d7/5d2f861155e9749f9
 [[package]]
 name = "tide-sdk"
 version = "0.1.12"
-source = { git = "https://github.com/NorthCarolinaRivalRobotics/tide.git#84d9ceeb5969c80a8fe6d74f4d4080e61845e306" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cbor2" },
     { name = "eclipse-zenoh" },
@@ -1167,6 +1167,10 @@ dependencies = [
     { name = "pyyaml" },
     { name = "rerun-sdk" },
     { name = "rich" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7d/9e/5be57e54b8b8f053e24510866620a31625cb71a70ce3824dae6ae8024c45/tide_sdk-0.1.12.tar.gz", hash = "sha256:91992a635d94b02e3be728268b74766662eb9b5446c8571eaa543200667ab1b4", size = 32609, upload-time = "2025-08-31T02:59:44.197Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/64/86/98d40bb81b38e4383edfa931744c37694fcad6dcc8b0c12af057a1589345/tide_sdk-0.1.12-py3-none-any.whl", hash = "sha256:9ea42a1424114ee4831a83efe245dd3dcad73b6be9a31af5f62ff4772662f868", size = 62801, upload-time = "2025-08-31T02:59:42.762Z" },
 ]
 
 [[package]]
