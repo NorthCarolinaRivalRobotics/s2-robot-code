@@ -38,22 +38,9 @@ class TeleopNode(BaseNode):
         self.deadzone = 0.05
         self.field_relative = True  # Convert joystick to field-relative driving
 
-        # Go-to-position PD control config
-        self.goto_enabled = False
-        self.goto_started = False
-        self.goto_started_time = 0.0
-        self.goto_still_time = 0.0
-        self.has_moved = False
+        # Target pose UI (for Go-To node)
         self.target_pose = np.array([0.0, 0.0, 0.0])  # x, y, theta
         self.has_target = False
-        self.kp_lin = 3.0
-        self.kd_lin = 0.0
-        self.kp_ang = 0.8
-        self.kd_ang = 0.2
-        self.stop_pos_tol_m = 0.03  # 3 cm
-        self.stop_ang_tol_rad = math.radians(1.0)  # 1 degree
-        self.near_zero_lin = 0.05  # m/s threshold
-        self.near_zero_ang = 0.05  # rad/s threshold
         
         # Override from config
         if config:
@@ -63,23 +50,19 @@ class TeleopNode(BaseNode):
             self.max_angular_speed = config.get("max_angular_speed", self.max_angular_speed)
             self.deadzone = config.get("deadzone", self.deadzone)
             self.field_relative = config.get("field_relative", self.field_relative)
-            # Optional PD gains and tolerances
-            self.kp_lin = float(config.get("kp_lin", self.kp_lin))
-            self.kd_lin = float(config.get("kd_lin", self.kd_lin))
-            self.kp_ang = float(config.get("kp_ang", self.kp_ang))
-            self.kd_ang = float(config.get("kd_ang", self.kd_ang))
-            self.stop_pos_tol_m = float(config.get("stop_pos_tol_m", self.stop_pos_tol_m))
-            self.stop_ang_tol_rad = float(config.get("stop_ang_tol_rad", self.stop_ang_tol_rad))
-            self.near_zero_lin = float(config.get("near_zero_lin", self.near_zero_lin))
-            self.near_zero_ang = float(config.get("near_zero_ang", self.near_zero_ang))
+            # No PD gains here; TeleopNode only handles manual control and UI
         
         # Set update rate
         self.hz = self.update_rate
         
         # Topic names
-        self.twist_topic = robot_topic(self.robot_id, CmdTopic.TWIST.value)
+        # Publish manual teleop twist to dedicated topic for Mux
+        self.twist_topic = robot_topic(self.robot_id, "cmd/teleop")
         self.odom_topic = robot_topic(self.robot_id, "state/pose2d")
         self.target_topic = robot_topic(self.robot_id, "ui/target_pose2d")
+        # Go-To control events
+        self.goto_start_topic = robot_topic(self.robot_id, "ui/goto/start")
+        self.goto_cancel_topic = robot_topic(self.robot_id, "ui/goto/cancel")
 
         # Odometry subscription for field-relative driving
         self.current_theta = 0.0
@@ -110,7 +93,7 @@ class TeleopNode(BaseNode):
         self.logger.info("  D-Pad: Move target (field X/Y)")
         self.logger.info("  L1/R1: Rotate target heading")
         self.logger.info("  Square: Start go-to-position")
-        self.logger.info("  Cross or move sticks: Cancel go-to-position")
+        self.logger.info("  Cross: Cancel go-to-position")
 
     def _on_odometry(self, sample):
         """Update the latest robot yaw from odometry (radians)."""
@@ -261,70 +244,21 @@ class TeleopNode(BaseNode):
         if btn.get('r1'):
             self.target_pose[2] += rot_speed * dt
             self.has_target = True
-        # Start/Cancel goto
+        # Start/Cancel goto: publish UI events for GoToPositionNode
         if btn.get('square') and self.has_target:
-            self.goto_enabled = True
-            self.goto_started = False
-            self.goto_started_time = 0.0
-            self.goto_still_time = 0.0
-            self.has_moved = False
+            try:
+                self.put(self.goto_start_topic, to_zenoh_value(True))
+            except Exception as e:
+                self.logger.debug(f"Failed to publish goto start: {e}")
         if btn.get('cross'):
-            self.goto_enabled = False
+            try:
+                self.put(self.goto_cancel_topic, to_zenoh_value(True))
+            except Exception as e:
+                self.logger.debug(f"Failed to publish goto cancel: {e}")
         # Always publish target if available
         self._publish_target()
 
-    def _compute_odometry_derivatives(self, dt: float):
-        """Estimate velocity from last pose and current pose."""
-        # Prefer using odometry timestamps between last two samples
-        if self._last_pose is None or self._prev_pose is None or self._last_pose_ts is None or self._prev_pose_ts is None:
-            return 0.0, 0.0, 0.0
-        x0, y0, th0 = self._prev_pose
-        x1, y1, th1 = self._last_pose
-        dt_pose = max(self._last_pose_ts - self._prev_pose_ts, 1e-6)
-        # Normalize angle diff to [-pi, pi]
-        dtheta = math.atan2(math.sin(th1 - th0), math.cos(th1 - th0))
-        return (x1 - x0) / dt_pose, (y1 - y0) / dt_pose, dtheta / dt_pose
-
-    def _goto_twist(self, dt: float):
-        """Compute PD-based twist to drive toward target in field frame, then map to robot frame."""
-        # Errors in field frame
-        err_x = float(self.target_pose[0] - self.current_x)
-        err_y = float(self.target_pose[1] - self.current_y)
-        print("target_pose", self.target_pose)
-        print("current_theta", self.current_theta)
-        err_th = math.atan2(math.sin(self.target_pose[2] - self.current_theta), math.cos(self.target_pose[2] - self.current_theta))
-
-        # P-only in field frame for simplicity and stability
-        vfx = self.kp_lin * err_x * clipped_cos(err_th) 
-        vfy = -self.kp_lin * err_y * clipped_cos(err_th)
-        wcmd = -self.kp_ang * err_th
-
-        # Completion checks
-        pos_err = math.hypot(err_x, err_y)
-        at_pos = pos_err <= self.stop_pos_tol_m and abs(err_th) <= self.stop_ang_tol_rad
-
-        # Estimate measured velocity from odometry timestamps for settle decision
-        vx_m, vy_m, w_m = self._compute_odometry_derivatives(dt)
-        speed_mag = math.hypot(vx_m, vy_m)
-        near_zero_now = speed_mag <= self.near_zero_lin and abs(w_m) <= self.near_zero_ang
-
-        now = time.time()
-        if not self.goto_started:
-            self.goto_started = True
-            self.goto_started_time = now
-            self.goto_still_time = 0.0
-            self.has_moved = False
-        else:
-            if speed_mag > (self.near_zero_lin * 1.5) or abs(w_m) > (self.near_zero_ang * 1.5):
-                self.has_moved = True
-            if self.has_moved and near_zero_now:
-                self.goto_still_time += dt
-            else:
-                self.goto_still_time = 0.0
-
-        done = at_pos or (self.has_moved and self.goto_still_time >= 1.0)
-
-        return vfx, vfy, wcmd, done
+    # TeleopNode no longer computes go-to twists; that logic moved to GoToPositionNode
 
     
     def _create_twist_message(self, linear_x, linear_y, angular_z):
@@ -359,32 +293,21 @@ class TeleopNode(BaseNode):
             # Update target editing from buttons (and publish)
             self._update_target_from_inputs(dt)
 
-            # Cancel goto if any stick moved
-            if self.goto_enabled and (abs(inputs['linear_x']) > 0.0 or abs(inputs['linear_y']) > 0.0 or abs(inputs['angular_z']) > 0.0):
-                self.goto_enabled = False
-
-            if self.goto_enabled and self.has_target:
-                # PD controller to target
-                vbx, vby, wz, done = self._goto_twist(dt)
-                linear_x, linear_y, angular_z = vbx, vby, wz
-                if done:
-                    self.goto_enabled = False
-            else:
-                # Teleop mode: optionally convert to robot-frame using SE2 exp/log mapping
-                if self.field_relative:
-                    try:
-                        twist_vec = np.array([linear_x, linear_y, angular_z], dtype=float)
-                        t_cmd = SE2.exp(twist_vec)
-                        r_inv = SE2.exp(np.array([0.0, 0.0, -self.current_theta], dtype=float)).inverse()
-                        t_body = r_inv * t_cmd
-                        # Preserve commanded angular rate explicitly
-                        t_body = SE2(translation=t_body.translation, rotation=SO2(theta=angular_z))
-                        t_twist = t_body.log()
-                        linear_x = t_twist[0]
-                        linear_y = t_twist[1]
-                        angular_z = t_twist[2]
-                    except Exception as map_e:
-                        self.logger.debug(f"Field-relative mapping failed; using raw inputs: {map_e}")
+            # Teleop mode only: optionally convert to robot-frame using SE2 exp/log mapping
+            if self.field_relative:
+                try:
+                    twist_vec = np.array([linear_x, linear_y, angular_z], dtype=float)
+                    t_cmd = SE2.exp(twist_vec)
+                    r_inv = SE2.exp(np.array([0.0, 0.0, -self.current_theta], dtype=float)).inverse()
+                    t_body = r_inv * t_cmd
+                    # Preserve commanded angular rate explicitly
+                    t_body = SE2(translation=t_body.translation, rotation=SO2(theta=angular_z))
+                    t_twist = t_body.log()
+                    linear_x = t_twist[0]
+                    linear_y = t_twist[1]
+                    angular_z = t_twist[2]
+                except Exception as map_e:
+                    self.logger.debug(f"Field-relative mapping failed; using raw inputs: {map_e}")
 
             # Create and publish twist message (robot-frame)
             twist_msg = self._create_twist_message(linear_x, linear_y, angular_z)

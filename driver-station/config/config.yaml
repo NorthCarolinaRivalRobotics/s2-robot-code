@@ -12,6 +12,33 @@ nodes:
       deadzone: 0.05  # Controller deadzone
       field_relative: true  # Use odometry to drive in field frame
 
+  # Go-To-Position controller node (publishes autonomy twist)
+  - type: nodes.goto_node.GoToPositionNode
+    params:
+      robot_id: "cash"
+      update_rate: 30.0
+      # PD gains and tolerances (match validated math)
+      kp_lin: 3.0
+      kd_lin: 0.0
+      kp_ang: 0.8
+      kd_ang: 0.2
+      stop_pos_tol_m: 0.03
+      stop_ang_tol_rad: 0.0174533  # ~1 deg
+      near_zero_lin: 0.05
+      near_zero_ang: 0.05
+
+  # Priority-based command multiplexer
+  - type: tide.components.MuxNode
+    params:
+      robot_id: cash
+      inputs:
+        - topic: /cash/cmd/teleop
+          priority: 0   # Highest priority (manual override)
+        - topic: /cash/cmd/autonomy
+          priority: 1
+      output_topic: /cash/cmd/twist  # Publishes to /cash/cmd/twist
+      msg_type: tide.models.common.Twist2D
+
   # Robot Odometry Node - subscribes to velocity twists and IMU data
   - type: nodes.robot_odometry.RobotOdometryNode
     params:
