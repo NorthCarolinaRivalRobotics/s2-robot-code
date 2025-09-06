@@ -111,7 +111,7 @@ async def main():
     # Arm command subscription (Vector2: x=shoulder, y=elbow in joint revolutions)
     ARM_CMD_KEY = robot_topic(ROBOT_ID, "cmd/arm/target").strip('/')
     def _arm_cmd_listener(sample):
-        nonlocal last_arm_recv, arm_target
+        global last_arm_recv, arm_target
         try:
             vec = from_zenoh_value(sample.payload, Vector2)
             arm_target = Vector2(x=float(vec.x), y=float(vec.y))
