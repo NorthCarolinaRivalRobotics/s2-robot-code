@@ -71,8 +71,11 @@ class ArmController:
     def _motor_to_joint(self, motor_revs: float, motor_id: int) -> float:
         return (motor_revs - self._motor_zero[motor_id]) / self.gear_ratio
 
-    async def set_targets(self, shoulder_joint_revs: float, elbow_joint_revs: float) -> None:
-        """Command both joints to target joint rotations (revs)."""
+    async def set_targets(self, shoulder_joint_revs: float, elbow_joint_revs: float, *, query: bool = False) -> Tuple[float, float] | None:
+        """Command both joints to target joint rotations (revs).
+
+        If query=True, returns a tuple (shoulder_rev, elbow_rev) from the same cycle results.
+        """
         self._target_joint[self.shoulder_id] = shoulder_joint_revs
         self._target_joint[self.elbow_id] = elbow_joint_revs
 
@@ -83,7 +86,7 @@ class ArmController:
                 velocity=0.0,
                 maximum_torque=self.max_torque_nm,
                 velocity_limit=self.max_velocity_rps,
-                query=False,
+                query=query,
             )
         )
         cmds.append(
@@ -92,10 +95,23 @@ class ArmController:
                 velocity=0.0,
                 maximum_torque=self.max_torque_nm,
                 velocity_limit=self.max_velocity_rps,
-                query=False,
+                query=query,
             )
         )
-        await self.transport.cycle(cmds)
+        results = await self.transport.cycle(cmds)
+        if not query:
+            return None
+        # Parse joint positions from results
+        joint_s = self._target_joint[self.shoulder_id]
+        joint_e = self._target_joint[self.elbow_id]
+        for r in results:
+            if r.id == self.shoulder_id and hasattr(r, 'values') and r.values is not None:
+                if moteus.Register.POSITION in r.values:
+                    joint_s = self._motor_to_joint(float(r.values[moteus.Register.POSITION]), self.shoulder_id)
+            elif r.id == self.elbow_id and hasattr(r, 'values') and r.values is not None:
+                if moteus.Register.POSITION in r.values:
+                    joint_e = self._motor_to_joint(float(r.values[moteus.Register.POSITION]), self.elbow_id)
+        return (joint_s, joint_e)
 
     async def increment(self, d_shoulder: float, d_elbow: float) -> Tuple[float, float]:
         """Increment current targets by the provided deltas (joint revolutions)."""
@@ -106,12 +122,16 @@ class ArmController:
 
     async def query_positions(self) -> Tuple[float, float]:
         """Return current joint positions (revolutions), based on motor positions."""
+        # Note: Prefer set_targets(..., query=True) in a control loop to avoid sending
+        # a query-only packet. This function remains for ad-hoc reads.
         results = await self.transport.cycle([
             self.servos[self.shoulder_id].make_position(
-                position=math.nan, velocity=0.0, maximum_torque=0.0, query=True
+                position=self._joint_to_motor(self._target_joint[self.shoulder_id], self.shoulder_id),
+                velocity=0.0, maximum_torque=self.max_torque_nm, velocity_limit=self.max_velocity_rps, query=True
             ),
             self.servos[self.elbow_id].make_position(
-                position=math.nan, velocity=0.0, maximum_torque=0.0, query=True
+                position=self._joint_to_motor(self._target_joint[self.elbow_id], self.elbow_id),
+                velocity=0.0, maximum_torque=self.max_torque_nm, velocity_limit=self.max_velocity_rps, query=True
             ),
         ])
         joint_s = 0.0

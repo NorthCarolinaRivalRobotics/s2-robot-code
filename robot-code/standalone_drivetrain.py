@@ -160,10 +160,10 @@ async def main():
                     reference_vx, reference_vy, reference_w, query_velocities=True
                 )
 
-                # Command arm position if we have a target
-                # Maintain last command if no recent updates; do not zero.
+                # Command arm position and query state in same cycle (avoid query-only packet)
+                arm_state = None
                 if hardware is not None:
-                    await hardware.arm.set_targets(arm_target.x, arm_target.y)
+                    arm_state = await hardware.arm.set_targets(arm_target.x, arm_target.y, query=True)
                 
                 # Publish state if we got wheel velocities back
                 if wheel_velocities:
@@ -191,11 +191,10 @@ async def main():
                     payload = to_zenoh_value(current_twist)
                     state_twist_pub.put(payload)
 
-                # Publish arm joint positions periodically
-                if hardware is not None:
-                    # s, e = await hardware.arm.query_positions()
-                    arm_vec = Vector2(x=0.0, y=0.0)
-                    arm_state_pub.put(to_zenoh_value(arm_vec))
+                # Publish arm joint positions from same cycle result
+                if hardware is not None and arm_state is not None:
+                    s, e = arm_state
+                    arm_state_pub.put(to_zenoh_value(Vector2(x=s, y=e)))
                     
                     if step_count % 60 == 0:  # Log every 2 seconds at 30Hz
                         print(f"Driving: cmd=({reference_vx:.2f}, {reference_vy:.2f}, {reference_w:.2f}), "

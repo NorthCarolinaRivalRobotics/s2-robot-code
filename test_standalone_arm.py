@@ -29,7 +29,7 @@ MAX_TORQUE_NM = 1.0
 MAX_VELOCITY_RPS = 2.0  # motor rev/s
 
 # Motion parameters
-JOINT_DELTA_REV = 0.05  # move ~18 degrees at the joint
+JOINT_DELTA_REV = -0.1  # move ~18 degrees at the joint
 DWELL_S = 0.5
 CYCLES = 3
 
