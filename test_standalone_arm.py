@@ -32,6 +32,7 @@ MAX_VELOCITY_RPS = np.nan  # motor rev/s
 
 # Motion parameters
 JOINT_DELTA_REV = -0.25  # move ~18 degrees at the joint
+JOINT_DELTA_REV_2 = 0.5
 DWELL_S = 0.5
 CYCLES = 3
 
@@ -74,7 +75,7 @@ async def main():
         return zero[motor_id] + joint_revs_target * GEAR_REDUCTION
 
     # Simple back-and-forth pattern for both joints
-    pattern = [0.0, +JOINT_DELTA_REV, 0.0, +JOINT_DELTA_REV, 0.0]
+    pattern = [0.0, +JOINT_DELTA_REV, 0.0, +JOINT_DELTA_REV_2, 0.0]
 
     try:
         for cycle in range(CYCLES):
