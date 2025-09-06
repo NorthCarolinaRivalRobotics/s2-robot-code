@@ -16,8 +16,8 @@ from typing import Optional, Dict, Any, Tuple
 
 import moteus_pi3hat
 
-from .mecanum_drive import MecanumDrive
-from .arm_controller import ArmController
+from mecanum_drive import MecanumDrive
+from arm_controller import ArmController
 
 
 class MoteusHardware:

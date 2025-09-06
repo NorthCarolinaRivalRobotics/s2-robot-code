@@ -23,15 +23,9 @@ import rerun as rr
 from tide.core.node import BaseNode
 from tide.namespaces import robot_topic
 
-try:
-    from tide import StateTopic
-    from tide.models.serialization import from_zenoh_value
-    from tide.models import Twist2D
-except Exception:
-    # Optional at runtime; we do not strictly require these to run
-    StateTopic = None  # type: ignore
-    from_zenoh_value = None  # type: ignore
-    Twist2D = None  # type: ignore
+from tide import StateTopic
+from tide.models.serialization import from_zenoh_value
+from tide.models import Twist2D
 
 import sys
 import os
