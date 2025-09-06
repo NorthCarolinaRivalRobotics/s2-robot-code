@@ -61,8 +61,9 @@ class ArmController:
              self.servos[self.elbow_id].make_stop(query=True)]
         )
         for r in results:
-            if r.id in self._motor_zero and moteus.Register.POSITION in r.values:
-                self._motor_zero[r.id] = float(r.values[moteus.Register.POSITION])
+            rid = getattr(r, "id", None)
+            if rid in self._motor_zero and moteus.Register.POSITION in r.values:
+                self._motor_zero[rid] = float(r.values[moteus.Register.POSITION])
 
     def _joint_to_motor(self, joint_revs: float, motor_id: int) -> float:
         return self._motor_zero[motor_id] + joint_revs * self.gear_ratio
@@ -116,13 +117,13 @@ class ArmController:
         joint_s = 0.0
         joint_e = 0.0
         for r in results:
+            rid = getattr(r, "id", None)
             if moteus.Register.POSITION in r.values:
-                if r.id == self.shoulder_id:
+                if rid == self.shoulder_id:
                     joint_s = self._motor_to_joint(float(r.values[moteus.Register.POSITION]), self.shoulder_id)
-                elif r.id == self.elbow_id:
+                elif rid == self.elbow_id:
                     joint_e = self._motor_to_joint(float(r.values[moteus.Register.POSITION]), self.elbow_id)
         return (joint_s, joint_e)
 
     async def stop(self) -> None:
         await self.transport.cycle([self.servos[self.shoulder_id].make_stop(), self.servos[self.elbow_id].make_stop()])
-

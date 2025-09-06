@@ -181,19 +181,21 @@ class MecanumDrive:
         if query_velocities and results:
             wheel_velocities = {}
             for result in results:
-                if result.id in self.motor_ids:
+                rid = getattr(result, "id", None)
+                if rid in self.motor_ids:
                     try:
                         motor_speed = result.values[moteus.Register.VELOCITY]
-                        wheel_speed = self.motor_speed_to_wheel_speed(motor_speed, result.id)
-                        wheel_velocities[result.id] = wheel_speed
+                        wheel_speed = self.motor_speed_to_wheel_speed(motor_speed, rid)
+                        wheel_velocities[rid] = wheel_speed
                         # Update previous velocity for fallback
-                        self.previous_motor_velocities[result.id] = motor_speed
+                        self.previous_motor_velocities[rid] = motor_speed
                     except (KeyError, AttributeError):
                         # Use previous velocity if current read fails
-                        wheel_speed = self.motor_speed_to_wheel_speed(
-                            self.previous_motor_velocities[result.id], result.id
-                        )
-                        wheel_velocities[result.id] = wheel_speed
+                        if rid in self.previous_motor_velocities:
+                            wheel_speed = self.motor_speed_to_wheel_speed(
+                                self.previous_motor_velocities[rid], rid
+                            )
+                            wheel_velocities[rid] = wheel_speed
             
             # Convert to named format
             return {
@@ -237,21 +239,23 @@ class MecanumDrive:
         # Parse the results and convert to wheel speeds
         wheel_velocities = {}
         for result in results:
-            if result.id in self.motor_ids:
+            rid = getattr(result, "id", None)
+            if rid in self.motor_ids:
                 try:
                     motor_speed = result.values[moteus.Register.VELOCITY]
-                    wheel_speed = self.motor_speed_to_wheel_speed(motor_speed, result.id)
-                    wheel_velocities[result.id] = wheel_speed
+                    wheel_speed = self.motor_speed_to_wheel_speed(motor_speed, rid)
+                    wheel_velocities[rid] = wheel_speed
                     # Update previous velocity for fallback
-                    self.previous_motor_velocities[result.id] = motor_speed
+                    self.previous_motor_velocities[rid] = motor_speed
                 except (KeyError, AttributeError):
                     # Use previous velocity if current read fails
-                    print(f"Failed to read velocity for motor {result.id}, using previous value")
-                    wheel_speed = self.motor_speed_to_wheel_speed(
-                        self.previous_motor_velocities[result.id], result.id
-                    )
-                    wheel_velocities[result.id] = wheel_speed
-        
+                    if rid in self.previous_motor_velocities:
+                        print(f"Failed to read velocity for motor {rid}, using previous value")
+                        wheel_speed = self.motor_speed_to_wheel_speed(
+                            self.previous_motor_velocities[rid], rid
+                        )
+                        wheel_velocities[rid] = wheel_speed
+
         return wheel_velocities
     
     async def get_wheel_velocities_named(self):
