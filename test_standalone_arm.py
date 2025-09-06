@@ -88,14 +88,14 @@ async def main():
                         accel_limit=2.0,
                         query=True,
                     ),
-                    elbow.make_position(
-                        position=joint_target_to_motor_abs(joint_target, ELBOW_ID),
-                        velocity=0.0,
-                        maximum_torque=MAX_TORQUE_NM,
-                        velocity_limit=MAX_VELOCITY_RPS,
-                        accel_limit=2.0,
-                        query=True,
-                    ),
+                    # elbow.make_position(
+                    #     position=joint_target_to_motor_abs(joint_target, ELBOW_ID),
+                    #     velocity=0.0,
+                    #     maximum_torque=MAX_TORQUE_NM,
+                    #     velocity_limit=MAX_VELOCITY_RPS,
+                    #     accel_limit=2.0,
+                    #     query=True,
+                    # ),
                 ]
 
                 # Continuously send commands for the dwell duration
