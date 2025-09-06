@@ -193,8 +193,8 @@ async def main():
 
                 # Publish arm joint positions periodically
                 if hardware is not None:
-                    s, e = await hardware.arm.query_positions()
-                    arm_vec = Vector2(x=s, y=e)
+                    # s, e = await hardware.arm.query_positions()
+                    arm_vec = Vector2(x=0.0, y=0.0)
                     arm_state_pub.put(to_zenoh_value(arm_vec))
                     
                     if step_count % 60 == 0:  # Log every 2 seconds at 30Hz
