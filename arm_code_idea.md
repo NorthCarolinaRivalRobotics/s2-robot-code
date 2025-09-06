@@ -21,15 +21,18 @@ we should publish the positions of both joints
 
 for now we should zero the position on startup 
 
+in order to prevent hardware access conflicts we should perform both the arm control and drivetrain control off the same instance.  so standalone_drivetrain should transition to something like moteus_hardware.py 
+
 driver station changes: 
 For control we should have it setup so the d pad slowly increments the position of the motors, left and right do the shoulder and up and down will do the elbow.  This should be debounced ideally and if it is properly debounced it should move a small but noticable amount.
 
-we should implement a node for handling gamepad state at this point.  Preserve all existing functionality.  
+we should implement a node for handling gamepad state at this point.  Preserve all existing functionality.  This node should handle all the gamepad requirements including the current gamepad functionality for the drivetrain.  This will serve as a nice abstraction.  We should only have one node be accessing the controller ever.  
 
 See example_moteus_swerve.py to see how to use the moteus position api
 
 Let me know if there are any conflicting goals 
 
 First start by researching the existing code then plan and finally implement the changes.
+
 
 

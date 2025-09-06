@@ -17,7 +17,7 @@ class MecanumDrive:
     - Motor 2: Back Right
     """
     
-    def __init__(self, motor_ids=[4, 1, 3, 2], servo_bus_map=None):
+    def __init__(self, motor_ids=[4, 1, 3, 2], servo_bus_map=None, transport=None):
         """
         Initialize the mecanum drive.
         
@@ -49,11 +49,11 @@ class MecanumDrive:
         self.previous_motor_velocities = {motor_id: 0.0 for motor_id in motor_ids}
 
         # Setup transport
-        if servo_bus_map is None:
-            servo_bus_map = {1: [1,2], 2: [3,4]}  # Default: all motors on bus 1
-        
-        self.transport = moteus_pi3hat.Pi3HatRouter(servo_bus_map=servo_bus_map)
-        
+        # Allow an external transport to be provided so multiple controllers can share it.
+        if transport is not None:
+            self.transport = transport
+        else:
+            raise ValueError("Transport must be provided")
         # Create motor controllers
         self.motors = {
             motor_id: moteus.Controller(id=motor_id, transport=self.transport) 

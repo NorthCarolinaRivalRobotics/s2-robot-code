@@ -31,6 +31,7 @@ except ImportError:
     sys.exit(1)
 
 from mecanum_drive import MecanumDrive
+from moteus_hardware import MoteusHardware
 
 # Global state variables (following example_moteus_swerve.py pattern)
 last_recv = time.monotonic()
@@ -45,8 +46,14 @@ VELOCITY_KEY = robot_topic(ROBOT_ID, CmdTopic.TWIST.value).strip('/')
 STATE_TWIST_KEY = robot_topic(ROBOT_ID, StateTopic.TWIST.value).strip('/')
 GYRO_KEY = robot_topic(ROBOT_ID, "sensor/imu/gyro").strip('/')
 
-# Drive controller
-drive = None
+# Hardware (shared transport for drivetrain + arm)
+hardware: MoteusHardware | None = None
+drive: MecanumDrive | None = None
+
+# Arm control state
+arm_target = Vector2(x=0.0, y=0.0)  # shoulder, elbow in joint rotations
+ARM_CMD_TIMEOUT = 2.0
+last_arm_recv = 0.0
 
 def zenoh_velocity_listener(sample):
     """Callback for incoming velocity commands using Tide serialization."""
@@ -78,17 +85,14 @@ def zenoh_gyro_listener(sample):
 
 async def initialize_drive():
     """Initialize the mecanum drive system."""
-    global drive
-    if drive is None:
-        print("Initializing mecanum drive...")
-        try:
-            drive = MecanumDrive()
-            await drive.set_stops()
-            print("Mecanum drive initialized successfully")
-        except Exception as e:
-            print(f"Failed to initialize mecanum drive: {e}")
-            raise
-    return drive
+    global hardware, drive
+    if hardware is None:
+        print("Initializing shared moteus hardware (drive + arm)...")
+        hardware = MoteusHardware(robot_id=ROBOT_ID)
+        await hardware.initialize()
+        drive = hardware.drive
+        print("Hardware initialized successfully")
+    return drive  # type: ignore[return-value]
 
 async def main():
     """Main function - simple control loop following example_moteus_swerve.py pattern."""
@@ -104,12 +108,30 @@ async def main():
     _ = session.declare_subscriber(VELOCITY_KEY, zenoh_velocity_listener)
     _ = session.declare_subscriber(GYRO_KEY, zenoh_gyro_listener)
     
+    # Arm command subscription (Vector2: x=shoulder, y=elbow in joint revolutions)
+    ARM_CMD_KEY = robot_topic(ROBOT_ID, "cmd/arm/target").strip('/')
+    def _arm_cmd_listener(sample):
+        nonlocal last_arm_recv, arm_target
+        try:
+            vec = from_zenoh_value(sample.payload, Vector2)
+            arm_target = Vector2(x=float(vec.x), y=float(vec.y))
+            last_arm_recv = time.monotonic()
+            print(f"Arm cmd: shoulder={arm_target.x:.3f} rev, elbow={arm_target.y:.3f} rev")
+        except Exception as e:
+            print(f"Failed to parse arm command: {e}")
+    _ = session.declare_subscriber(ARM_CMD_KEY, _arm_cmd_listener)
+    
     # Publisher for state twist
     state_twist_pub = session.declare_publisher(STATE_TWIST_KEY)
+    # Publisher for arm state (Vector2: joint rotations)
+    ARM_STATE_KEY = robot_topic(ROBOT_ID, "state/arm/position").strip('/')
+    arm_state_pub = session.declare_publisher(ARM_STATE_KEY)
     
     print(f"Subscribed to {VELOCITY_KEY}")
     print(f"Subscribed to {GYRO_KEY}")
     print(f"Publishing state to {STATE_TWIST_KEY}")
+    print(f"Subscribed to {ARM_CMD_KEY}")
+    print(f"Publishing arm state to {ARM_STATE_KEY}")
     
     # Initialize the drive
     await initialize_drive()
@@ -137,6 +159,11 @@ async def main():
                 wheel_velocities = await drive.drive(
                     reference_vx, reference_vy, reference_w, query_velocities=True
                 )
+
+                # Command arm position if we have a target
+                # Maintain last command if no recent updates; do not zero.
+                if hardware is not None:
+                    await hardware.arm.set_targets(arm_target.x, arm_target.y)
                 
                 # Publish state if we got wheel velocities back
                 if wheel_velocities:
@@ -163,6 +190,12 @@ async def main():
                     )
                     payload = to_zenoh_value(current_twist)
                     state_twist_pub.put(payload)
+
+                # Publish arm joint positions periodically
+                if hardware is not None:
+                    s, e = await hardware.arm.query_positions()
+                    arm_vec = Vector2(x=s, y=e)
+                    arm_state_pub.put(to_zenoh_value(arm_vec))
                     
                     if step_count % 60 == 0:  # Log every 2 seconds at 30Hz
                         print(f"Driving: cmd=({reference_vx:.2f}, {reference_vy:.2f}, {reference_w:.2f}), "
@@ -183,9 +216,9 @@ async def main():
         print(f"Unexpected error: {e}")
     finally:
         # Stop all motors
-        if drive:
+        if hardware and hardware.drive:
             try:
-                await drive.stop_all_motors()
+                await hardware.stop_all()
                 print("Motors stopped")
             except Exception as e:
                 print(f"Error stopping motors: {e}")

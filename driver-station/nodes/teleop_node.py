@@ -60,6 +60,8 @@ class TeleopNode(BaseNode):
         self.twist_topic = robot_topic(self.robot_id, "cmd/teleop")
         self.odom_topic = robot_topic(self.robot_id, "state/pose2d")
         self.target_topic = robot_topic(self.robot_id, "ui/target_pose2d")
+        # Arm target topic (Vector2: x=shoulder revs, y=elbow revs)
+        self.arm_cmd_topic = robot_topic(self.robot_id, "cmd/arm/target")
         # Go-To control events
         self.goto_start_topic = robot_topic(self.robot_id, "ui/goto/start")
         self.goto_cancel_topic = robot_topic(self.robot_id, "ui/goto/cancel")
@@ -86,6 +88,13 @@ class TeleopNode(BaseNode):
         # Teleop publish gating: only publish when inputs are active
         self._teleop_active = False
         
+        # Arm control state (driver station side)
+        self.arm_target = np.array([0.0, 0.0], dtype=float)  # [shoulder, elbow] in joint revs
+        self.arm_step = (config or {}).get('arm_step', 0.02)  # revs per tick
+        self.arm_repeat_interval = (config or {}).get('arm_repeat_interval', 0.3)  # seconds
+        self._arm_last_hat = (0, 0)
+        self._arm_last_emit = 0.0
+        
         self.logger.info(f"Teleop Node started for robot {self.robot_id}")
         self.logger.info("Controls:")
         self.logger.info("  Left stick: Linear movement (X/Y)")
@@ -96,6 +105,9 @@ class TeleopNode(BaseNode):
         self.logger.info("  L1/R1: Rotate target heading")
         self.logger.info("  Square: Start go-to-position")
         self.logger.info("  Cross: Cancel go-to-position")
+        self.logger.info("Arm control:")
+        self.logger.info("  D-Pad Left/Right: Shoulder -/+ small step")
+        self.logger.info("  D-Pad Up/Down: Elbow +/− small step")
 
     def _on_odometry(self, sample):
         """Update the latest robot yaw from odometry (radians)."""
@@ -262,6 +274,37 @@ class TeleopNode(BaseNode):
 
     # TeleopNode no longer computes go-to twists; that logic moved to GoToPositionNode
 
+    def _update_arm_from_hat(self, now: float) -> None:
+        """Use D-pad to increment arm joint targets with debouncing and slow repeat."""
+        btn = self._read_buttons()
+        if not btn:
+            return
+        hat = (int(btn.get('hat_x', 0)), int(btn.get('hat_y', 0)))
+        # Reset debounce when hat released
+        if hat == (0, 0):
+            self._arm_last_hat = (0, 0)
+            return
+        # Emit on edge or at slow repeat interval
+        should_emit = False
+        if hat != self._arm_last_hat:
+            should_emit = True
+        elif (now - self._arm_last_emit) >= float(self.arm_repeat_interval):
+            should_emit = True
+        if not should_emit:
+            return
+        # Map hat to deltas: left/right -> shoulder, up/down -> elbow
+        d_shoulder = float(hat[0]) * self.arm_step  # right=+1, left=-1
+        d_elbow = float(hat[1]) * self.arm_step    # up=+1, down=-1
+        # Update and publish
+        self.arm_target[0] += d_shoulder
+        self.arm_target[1] += d_elbow
+        try:
+            self.put(self.arm_cmd_topic, to_zenoh_value(Vector2(x=float(self.arm_target[0]), y=float(self.arm_target[1]))))
+        except Exception as e:
+            self.logger.debug(f"Failed to publish arm target: {e}")
+        self._arm_last_hat = hat
+        self._arm_last_emit = now
+
     
     def _create_twist_message(self, linear_x, linear_y, angular_z):
         """Create a twist message."""
@@ -294,6 +337,8 @@ class TeleopNode(BaseNode):
 
             # Update target editing from buttons (and publish)
             self._update_target_from_inputs(dt)
+            # Update arm control from D-pad (debounced small steps)
+            self._update_arm_from_hat(now)
 
             # Teleop mode only: optionally convert to robot-frame using SE2 exp/log mapping
             if self.field_relative:
