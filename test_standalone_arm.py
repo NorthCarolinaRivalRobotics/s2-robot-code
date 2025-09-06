@@ -98,27 +98,28 @@ async def main():
                     ),
                 ]
 
-                res = await transport.cycle(cmds)
+                # Continuously send commands for the dwell duration
+                end_time = time.time() + DWELL_S
+                while time.time() < end_time:
+                    res = await transport.cycle(cmds)
 
-                # Extract and print joint positions
-                s_joint = None
-                e_joint = None
-                for rr in res:
-                    if moteus.Register.POSITION not in rr.values:
-                        continue
-                    if rr.id == SHOULDER_ID:
-                        s_joint = motor_to_joint_revs(float(rr.values[moteus.Register.POSITION]), zero[SHOULDER_ID])
-                    elif rr.id == ELBOW_ID:
-                        e_joint = motor_to_joint_revs(float(rr.values[moteus.Register.POSITION]), zero[ELBOW_ID])
+                    # Extract and print joint positions
+                    s_joint = None
+                    e_joint = None
+                    for rr in res:
+                        if moteus.Register.POSITION not in rr.values:
+                            continue
+                        if rr.id == SHOULDER_ID:
+                            s_joint = motor_to_joint_revs(float(rr.values[moteus.Register.POSITION]), zero[SHOULDER_ID])
+                        elif rr.id == ELBOW_ID:
+                            e_joint = motor_to_joint_revs(float(rr.values[moteus.Register.POSITION]), zero[ELBOW_ID])
 
-                if s_joint is not None and e_joint is not None:
-                    print(
-                        f"Target joint: {joint_target:+.3f} rev  |  "
-                        f"Shoulder: {s_joint:+.3f} rev ({s_joint*360:+6.1f} deg)  "
-                        f"Elbow: {e_joint:+.3f} rev ({e_joint*360:+6.1f} deg)"
-                    )
-
-                await asyncio.sleep(DWELL_S)
+                    if s_joint is not None and e_joint is not None:
+                        print(
+                            f"Target joint: {joint_target:+.3f} rev  |  "
+                            f"Shoulder: {s_joint:+.3f} rev ({s_joint*360:+6.1f} deg)  "
+                            f"Elbow: {e_joint:+.3f} rev ({e_joint*360:+6.1f} deg)"
+                        )
 
         print("\nArm test complete.")
 
@@ -131,4 +132,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
