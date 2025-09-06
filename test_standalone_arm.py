@@ -32,7 +32,7 @@ MAX_VELOCITY_RPS = np.nan  # motor rev/s
 
 # Motion parameters
 JOINT_DELTA_REV = -0.25  # move ~18 degrees at the joint
-JOINT_DELTA_REV_2 = 0.5
+JOINT_DELTA_REV_2 = -0.5
 DWELL_S = 0.5
 CYCLES = 3
 
