@@ -26,7 +26,7 @@ class ArmController:
         transport: Optional[moteus_pi3hat.Pi3HatRouter] = None,
         servo_bus_map: Optional[dict] = None,
         gear_ratio: float = 10.0,
-        max_torque_nm: float = 0.1,
+        max_torque_nm: float = 1.0,
         max_velocity_rps: float = 0.5,
     ) -> None:
         # Transport can be shared; create if not provided
