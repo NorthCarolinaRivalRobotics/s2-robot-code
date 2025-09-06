@@ -30,7 +30,7 @@ MAX_VELOCITY_RPS = 2.0  # motor rev/s
 
 # Motion parameters
 JOINT_DELTA_REV = 0.05  # move ~18 degrees at the joint
-DWELL_S = 1.5
+DWELL_S = 0.5
 CYCLES = 3
 
 
@@ -85,7 +85,7 @@ async def main():
                         velocity=0.0,
                         maximum_torque=MAX_TORQUE_NM,
                         velocity_limit=MAX_VELOCITY_RPS,
-                        accel_limit=1.0,
+                        accel_limit=2.0,
                         query=True,
                     ),
                     elbow.make_position(
@@ -93,7 +93,7 @@ async def main():
                         velocity=0.0,
                         maximum_torque=MAX_TORQUE_NM,
                         velocity_limit=MAX_VELOCITY_RPS,
-                        accel_limit=1.0,
+                        accel_limit=2.0,
                         query=True,
                     ),
                 ]
