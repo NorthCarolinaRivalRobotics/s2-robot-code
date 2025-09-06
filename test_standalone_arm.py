@@ -13,6 +13,8 @@ import asyncio
 import math
 import time
 
+import numpy as np
+
 import moteus
 import moteus_pi3hat
 
@@ -26,7 +28,7 @@ GEAR_REDUCTION = 10.0  # motor revs per 1 joint rev
 
 # Conservative limits (per arm_code_idea.md)
 MAX_TORQUE_NM = 1.0
-MAX_VELOCITY_RPS = 2.0  # motor rev/s
+MAX_VELOCITY_RPS = 3.0  # motor rev/s
 
 # Motion parameters
 JOINT_DELTA_REV = -0.25  # move ~18 degrees at the joint
@@ -85,7 +87,7 @@ async def main():
                         velocity=0.0,
                         maximum_torque=MAX_TORQUE_NM,
                         velocity_limit=MAX_VELOCITY_RPS,
-                        accel_limit=2.0,
+                        accel_limit=np.nan,
                         query=True,
                     ),
                     # elbow.make_position(
