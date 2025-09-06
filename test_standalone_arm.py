@@ -25,8 +25,8 @@ ELBOW_ID = 5     # bus 4
 GEAR_REDUCTION = 10.0  # motor revs per 1 joint rev
 
 # Conservative limits (per arm_code_idea.md)
-MAX_TORQUE_NM = 0.25
-MAX_VELOCITY_RPS = 0.5  # motor rev/s
+MAX_TORQUE_NM = 1.0
+MAX_VELOCITY_RPS = 1.0  # motor rev/s
 
 # Motion parameters
 JOINT_DELTA_REV = 0.05  # move ~18 degrees at the joint
