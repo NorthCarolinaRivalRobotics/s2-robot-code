@@ -12,8 +12,10 @@ from typing import Optional, Tuple
 
 from tide.core.node import BaseNode
 from tide.core.geometry import SE2, SO2
-from tide.models import Pose2D
+from tide.models import Pose2D, Twist2D, Vector2
 from tide.models.serialization import to_zenoh_value
+
+EPSILON = np.finfo(np.float32).eps
 
 
 def robot_topic(robot_id: str, topic: str) -> str:
@@ -215,14 +217,14 @@ class RobotOdometryNode(BaseNode):
             
             # Create twist vector for SE2 exponential map
             # SE2 twist vector is [v_x, v_y, omega] * dt
-            twist_vector = np.array([
-                linear_x * dt,
-                linear_y * dt,
-                angular_z * dt
-            ])
-            
-            # Compute the exponential map to get the pose update
-            pose_delta = SE2.exp(twist_vector)
+            # twist_vector = np.array([
+            #     linear_x * dt * (1.0 / 1.021173988432097),
+            #     linear_y * dt * (1.0 / 1.0855876309224577),
+            #     angular_z * dt
+            # ])
+
+            twist = Twist2D(linear=Vector2(x=linear_x * dt, y=linear_y * dt), angular=angular_z * dt)
+            pose_delta = roadrunner_exp(twist)
             
             # Update the pose by multiplication (composition)
             self.current_pose = self.current_pose * pose_delta
@@ -330,3 +332,51 @@ class RobotOdometryNode(BaseNode):
         logger.info(f"Final pose - x: {x:.3f}m, y: {y:.3f}m, theta: {theta:.3f}rad ({math.degrees(theta):.1f}°)")
         
         super().cleanup()
+
+def roadrunner_exp(twist: Twist2D) -> SE2:
+    """
+        companion object {
+        @JvmStatic
+        fun exp(t: Twist2d): Pose2d {
+            val heading = Rotation2d.exp(t.angle)
+
+            val u = t.angle + snz(t.angle)
+            val c = 1 - cos(u)
+            val s = sin(u)
+            val translation = Vector2d(
+                (s * t.line.x - c * t.line.y) / u,
+                (c * t.line.x + s * t.line.y) / u
+            )
+
+            return Pose2d(translation, heading)
+        }
+    """
+    heading = SO2.exp(twist.angular)
+    print(f"Heading: {heading}")
+    u = twist.angular + roadrunner_snz(twist.angular)
+    print(f"U: {u}")
+    c = 1 - math.cos(u)
+    s = math.sin(u)
+    print(f"C: {c}")
+    print(f"S: {s}")
+    # Extract x and y components from Vector2 as floats
+    linear_x = float(twist.linear.x)
+    linear_y = float(twist.linear.y)
+    print(f"Linear X: {linear_x}")
+    print(f"Linear Y: {linear_y}")
+    translation = np.array([(s * linear_x - c * linear_y) / u, (c * linear_x + s * linear_y) / u])
+    return SE2(rotation=heading, translation=translation)
+
+def roadrunner_snz(value: float) -> float:
+    """
+     fun snz(x: Double) =
+        if (x >= 0.0) {
+            EPS
+        } else {
+            -EPS
+        }
+    """
+    if value >= 0.0:
+        return EPSILON
+    else:
+        return -EPSILON

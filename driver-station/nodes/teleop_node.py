@@ -83,6 +83,8 @@ class TeleopNode(BaseNode):
         # State management
         self.seq = 0
         self._last_time = None
+        # Teleop publish gating: only publish when inputs are active
+        self._teleop_active = False
         
         self.logger.info(f"Teleop Node started for robot {self.robot_id}")
         self.logger.info("Controls:")
@@ -309,14 +311,31 @@ class TeleopNode(BaseNode):
                 except Exception as map_e:
                     self.logger.debug(f"Field-relative mapping failed; using raw inputs: {map_e}")
 
-            # Create and publish twist message (robot-frame)
-            twist_msg = self._create_twist_message(linear_x, linear_y, angular_z)
-            self.logger.info(f"twist_msg: {twist_msg}")
-            self.put(self.twist_topic, to_zenoh_value(twist_msg))
+            # Determine if inputs are effectively idle (inside deadband)
+            inputs_idle = (linear_x == 0.0 and linear_y == 0.0 and angular_z == 0.0)
+
+            if inputs_idle:
+                # If we were active previously, send one zero then stop publishing
+                if self._teleop_active:
+                    zero = self._create_twist_message(0.0, 0.0, 0.0)
+                    try:
+                        self.put(self.twist_topic, to_zenoh_value(zero))
+                    except Exception:
+                        pass
+                    self._teleop_active = False
+                # Do not continuously publish zeros; allow mux to select autonomy
+            else:
+                # Inputs active: publish at rate and mark active
+                self._teleop_active = True
+                twist_msg = self._create_twist_message(linear_x, linear_y, angular_z)
+                self.put(self.twist_topic, to_zenoh_value(twist_msg))
             
             # Log status periodically
             if self.seq % 90 == 0:  # Every 3 seconds at 30Hz
-                self.logger.info(f"Teleop active - Linear: ({linear_x:.2f}, {linear_y:.2f}), Angular: {angular_z:.2f}")
+                self.logger.info(
+                    f"Teleop {'ACTIVE' if self._teleop_active else 'IDLE'} - "
+                    f"Linear: ({linear_x:.2f}, {linear_y:.2f}), Angular: {angular_z:.2f}"
+                )
             
         except Exception as e:
             self.logger.error(f"Error in step: {e}")

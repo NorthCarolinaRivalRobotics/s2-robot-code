@@ -20,6 +20,47 @@ from tide.models import Twist2D, Vector2, Pose2D
 from tide.models.serialization import to_zenoh_value
 
 
+# Simple velocity container to support arithmetic used by the limiter
+class Twist2dVelocity:
+    def __init__(self, vx: float = 0.0, vy: float = 0.0, w: float = 0.0):
+        self.vx = float(vx)
+        self.vy = float(vy)
+        self.w = float(w)
+
+    def __add__(self, other: "Twist2dVelocity") -> "Twist2dVelocity":
+        return Twist2dVelocity(self.vx + other.vx, self.vy + other.vy, self.w + other.w)
+
+    def __sub__(self, other: "Twist2dVelocity") -> "Twist2dVelocity":
+        return Twist2dVelocity(self.vx - other.vx, self.vy - other.vy, self.w - other.w)
+
+    def copy(self) -> "Twist2dVelocity":
+        return Twist2dVelocity(self.vx, self.vy, self.w)
+
+
+# Global previous twist used by the acceleration limiter
+prev_twist = Twist2dVelocity(0.0, 0.0, 0.0)
+
+
+def apply_acceleration_limit(twist: Twist2dVelocity, dt: float) -> Twist2dVelocity:
+    # the borrow checker should really be smart enough to figure out that this is safe in this case.  I love python.
+    global prev_twist
+    max_acceleration = 4.0
+    max_deceleration = 4.0
+
+    max_angular_acceleration = np.deg2rad(360 * 1)
+    max_angular_deceleration = np.deg2rad(360 * 2)
+
+    delta_twist = twist - prev_twist
+
+    delta_twist.vx = np.clip(delta_twist.vx, -max_deceleration * dt, max_acceleration * dt)
+    delta_twist.vy = np.clip(delta_twist.vy, -max_deceleration * dt, max_acceleration * dt)
+    delta_twist.w = np.clip(delta_twist.w, -max_angular_deceleration * dt, max_angular_acceleration * dt)
+    
+    prev_twist = prev_twist + delta_twist
+
+    return prev_twist
+
+
 class GoToPositionNode(BaseNode):
     def __init__(self, *, config=None):
         super().__init__(config=config)
@@ -221,7 +262,9 @@ class GoToPositionNode(BaseNode):
 
             if self.goto_enabled and self.has_target:
                 vbx, vby, wz, done = self._goto_twist(dt)
-                twist_msg = self._create_twist_message(vbx, vby, wz)
+                # Apply acceleration limiting to smooth commands
+                limited = apply_acceleration_limit(Twist2dVelocity(vbx, vby, wz), dt)
+                twist_msg = self._create_twist_message(limited.vx, limited.vy, limited.w)
                 self.put(self.autonomy_twist_topic, to_zenoh_value(twist_msg))
                 if done:
                     self.goto_enabled = False
@@ -249,4 +292,3 @@ class GoToPositionNode(BaseNode):
 def clipped_cos(x):
     x = max(min(x, np.pi/2), -np.pi/2)
     return math.cos(x)
-
