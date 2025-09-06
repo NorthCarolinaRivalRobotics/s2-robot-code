@@ -74,7 +74,7 @@ async def main():
         return zero[motor_id] + joint_revs_target * GEAR_REDUCTION
 
     # Simple back-and-forth pattern for both joints
-    pattern = [0.0, +JOINT_DELTA_REV, 0.0, -JOINT_DELTA_REV, 0.0]
+    pattern = [0.0, +JOINT_DELTA_REV, 0.0, +JOINT_DELTA_REV, 0.0]
 
     try:
         for cycle in range(CYCLES):
