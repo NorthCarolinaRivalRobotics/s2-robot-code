@@ -61,7 +61,8 @@ class TeleopNode(BaseNode):
         self.odom_topic = robot_topic(self.robot_id, "state/pose2d")
         self.target_topic = robot_topic(self.robot_id, "ui/target_pose2d")
         # Arm target topic (Vector2: x=shoulder revs, y=elbow revs)
-        self.arm_cmd_topic = robot_topic(self.robot_id, "cmd/arm/target")
+        # Strip leading slash to match robot subscriber keys
+        self.arm_cmd_topic = robot_topic(self.robot_id, "cmd/arm/target").lstrip('/')
         # Go-To control events
         self.goto_start_topic = robot_topic(self.robot_id, "ui/goto/start")
         self.goto_cancel_topic = robot_topic(self.robot_id, "ui/goto/cancel")
@@ -108,6 +109,8 @@ class TeleopNode(BaseNode):
         self.logger.info("Arm control:")
         self.logger.info("  D-Pad Left/Right: Shoulder -/+ small step")
         self.logger.info("  D-Pad Up/Down: Elbow +/− small step")
+        self.logger.info(f"  Arm step: {self.arm_step:.3f} rev, repeat every {self.arm_repeat_interval:.2f}s")
+        self.logger.info(f"  Arm cmd topic: {self.arm_cmd_topic}")
 
     def _on_odometry(self, sample):
         """Update the latest robot yaw from odometry (radians)."""
@@ -283,6 +286,8 @@ class TeleopNode(BaseNode):
         # Reset debounce when hat released
         if hat == (0, 0):
             self._arm_last_hat = (0, 0)
+            # Debug: hat released
+            self.logger.debug("Arm D-pad: released (no command)")
             return
         # Emit on edge or at slow repeat interval
         should_emit = False
@@ -291,6 +296,8 @@ class TeleopNode(BaseNode):
         elif (now - self._arm_last_emit) >= float(self.arm_repeat_interval):
             should_emit = True
         if not should_emit:
+            remaining = max(0.0, float(self.arm_repeat_interval) - (now - self._arm_last_emit))
+            self.logger.debug(f"Arm D-pad: debounced hat={hat}, next send in {remaining:.2f}s")
             return
         # Map hat to deltas: left/right -> shoulder, up/down -> elbow
         d_shoulder = float(hat[0]) * self.arm_step  # right=+1, left=-1
@@ -298,6 +305,10 @@ class TeleopNode(BaseNode):
         # Update and publish
         self.arm_target[0] += d_shoulder
         self.arm_target[1] += d_elbow
+        self.logger.info(
+            f"Arm D-pad SEND: hat={hat} dS={d_shoulder:+.3f} dE={d_elbow:+.3f} "
+            f"-> target(S,E)=({self.arm_target[0]:.3f},{self.arm_target[1]:.3f})"
+        )
         try:
             self.put(self.arm_cmd_topic, to_zenoh_value(Vector2(x=float(self.arm_target[0]), y=float(self.arm_target[1]))))
         except Exception as e:
