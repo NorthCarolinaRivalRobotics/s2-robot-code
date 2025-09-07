@@ -48,7 +48,7 @@ class ArmController:
         }
 
         # # Zero offsets: motor revolutions to treat as joint=0.0
-        # self._motor_zero = {shoulder_id: 0.0, elbow_id: 0.0}
+        self._motor_zero = {shoulder_id: 0.0, elbow_id: 0.0}
 
         # Target positions in joint revolutions (persist last command)
         self._target_joint = {shoulder_id: 0.0, elbow_id: 0.0}
