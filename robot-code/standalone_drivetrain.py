@@ -109,7 +109,7 @@ async def main():
     _ = session.declare_subscriber(GYRO_KEY, zenoh_gyro_listener)
     
     # Arm command subscription (Vector2: x=shoulder, y=elbow in joint revolutions)
-    ARM_CMD_KEY = robot_topic(ROBOT_ID, "cmd/arm/target").strip('/')
+    ARM_CMD_KEY = robot_topic(ROBOT_ID, "cmd/arm/target")
     print(f"DEBUG: ARM_CMD_KEY = '{ARM_CMD_KEY}'")
     def _arm_cmd_listener(sample):
         global last_arm_recv, arm_target
