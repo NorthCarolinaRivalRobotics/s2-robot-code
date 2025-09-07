@@ -127,7 +127,7 @@ async def main():
     # Publisher for state twist
     state_twist_pub = session.declare_publisher(STATE_TWIST_KEY)
     # Publisher for arm state (Vector2: joint rotations)
-    ARM_STATE_KEY = robot_topic(ROBOT_ID, "state/arm/position").strip('/')
+    ARM_STATE_KEY = robot_topic(ROBOT_ID, "state/arm/position")
     arm_state_pub = session.declare_publisher(ARM_STATE_KEY)
     
     print(f"Subscribed to {VELOCITY_KEY}")

@@ -307,7 +307,6 @@ class TeleopNode(BaseNode):
     def _update_target_from_inputs(self, dt: float):
         """Adjust target pose using D-pad and L1/R1; Triangle seeds from current pose."""
         btn = self._read_buttons()
-        self.logger.info(f"Buttons: {btn}")
         if not btn:
             return
         # Seed target to current pose
@@ -350,7 +349,6 @@ class TeleopNode(BaseNode):
     def _update_arm_from_hat(self, now: float) -> None:
         """Use D-pad to increment arm joint targets with debouncing and slow repeat."""
         btn = self._read_buttons()
-        self.logger.info(f"Buttons: {btn}")
         if not btn:
             return
         hat = (int(btn.get('hat_x', 0)), int(btn.get('hat_y', 0)))
@@ -376,10 +374,6 @@ class TeleopNode(BaseNode):
         # Update and publish
         self.arm_target[0] += d_shoulder
         self.arm_target[1] += d_elbow
-        self.logger.info(
-            f"Arm D-pad SEND: hat={hat} dS={d_shoulder:+.3f} dE={d_elbow:+.3f} "
-            f"-> target(S,E)=({self.arm_target[0]:.3f},{self.arm_target[1]:.3f})"
-        )
         try:
             self.put(self.arm_cmd_topic, to_zenoh_value(Vector2(x=float(self.arm_target[0]), y=float(self.arm_target[1]))))
         except Exception as e:
@@ -391,19 +385,16 @@ class TeleopNode(BaseNode):
         # Arm joints
         try:
             self.put(self.arm_cmd_topic, to_zenoh_value(Vector2(x=float(shoulder), y=float(elbow))))
-            self.logger.info(f"Published arm target: {shoulder}, {elbow} to topic '{self.arm_cmd_topic}'")
         except Exception as e:
             self.logger.info(f"Failed to publish arm target: {e}")
         # Wrist angle
         try:
             self.put(self.wrist_angle_topic, to_zenoh_value(float(wrist_angle)))
-            self.logger.info(f"Published wrist angle: {wrist_angle}")
         except Exception:
             self.logger.info(f"Failed to publish wrist angle: {e}")
         # Claw open/close
         try:
             self.put(self.claw_cmd_topic, to_zenoh_value(bool(claw_open)))
-            self.logger.info(f"Published claw open: {claw_open}")
         except Exception:
             self.logger.info(f"Failed to publish claw open: {e}")
 
@@ -411,13 +402,11 @@ class TeleopNode(BaseNode):
         pose = self._pose_map.get(self._arm_state, np.array([0.0, 0.0], dtype=float))
         wrist = float(self._wrist_angle_map.get(self._arm_state, 0.0))
         claw = bool(self._claw_open_map.get(self._arm_state, False))
-        self.logger.info(f"Arm State to be sent: {self._arm_state} Pose: {pose} Wrist: {wrist} Claw: {claw}")
         self.arm_target[:] = pose
         self._arm_publish_targets(float(pose[0]), float(pose[1]), wrist, claw)
 
     def _update_arm_state_machine(self, now: float):
         btn = self._read_buttons() or {}
-        self.logger.info(f"Buttons: {btn}")
 
         # Debounce window
         if (now - self._last_transition_ts) < self._debounce_s:
