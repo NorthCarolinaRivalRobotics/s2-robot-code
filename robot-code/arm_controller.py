@@ -40,6 +40,7 @@ class ArmController:
         self.gear_ratio = gear_ratio
         self.max_torque_nm = max_torque_nm
         self.max_velocity_rps = max_velocity_rps
+        self.calibrated_vertical_offsets = {6: 0.162841796875, 5: -2.033416748046875} # these are the values of the encoders when both arm segments are pointed straight up (pi / 2 from 0), this is pre-reduction
 
         # Controllers
         self.servos = {
