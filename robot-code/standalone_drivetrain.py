@@ -110,8 +110,10 @@ async def main():
     
     # Arm command subscription (Vector2: x=shoulder, y=elbow in joint revolutions)
     ARM_CMD_KEY = robot_topic(ROBOT_ID, "cmd/arm/target").strip('/')
+    print(f"DEBUG: ARM_CMD_KEY = '{ARM_CMD_KEY}'")
     def _arm_cmd_listener(sample):
         global last_arm_recv, arm_target
+        print(f"DEBUG: Received arm command on topic '{sample.key_expr}'")
         try:
             vec = from_zenoh_value(sample.payload, Vector2)
             arm_target = Vector2(x=float(vec.x), y=float(vec.y))
@@ -119,7 +121,8 @@ async def main():
             print(f"Arm cmd: shoulder={arm_target.x:.3f} rev, elbow={arm_target.y:.3f} rev")
         except Exception as e:
             print(f"Failed to parse arm command: {e}")
-    _ = session.declare_subscriber(ARM_CMD_KEY, _arm_cmd_listener)
+    arm_subscriber = session.declare_subscriber(ARM_CMD_KEY, _arm_cmd_listener)
+    print(f"DEBUG: Declared subscriber for '{ARM_CMD_KEY}'")
     
     # Publisher for state twist
     state_twist_pub = session.declare_publisher(STATE_TWIST_KEY)
