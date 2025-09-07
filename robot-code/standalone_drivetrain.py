@@ -50,8 +50,8 @@ GYRO_KEY = robot_topic(ROBOT_ID, "sensor/imu/gyro").strip('/')
 hardware: MoteusHardware | None = None
 drive: MecanumDrive | None = None
 
-# Arm control state
-arm_target = Vector2(x=0.0, y=0.0)  # shoulder, elbow in joint rotations
+# Arm control state (radians). Initialize to +pi/2 so no motion on startup.
+arm_target = Vector2(x=math.pi/2, y=math.pi/2)  # shoulder, elbow in radians
 ARM_CMD_TIMEOUT = 2.0
 last_arm_recv = 0.0
 
@@ -108,7 +108,7 @@ async def main():
     _ = session.declare_subscriber(VELOCITY_KEY, zenoh_velocity_listener)
     _ = session.declare_subscriber(GYRO_KEY, zenoh_gyro_listener)
     
-    # Arm command subscription (Vector2: x=shoulder, y=elbow in joint revolutions)
+    # Arm command subscription (Vector2: x=shoulder, y=elbow in radians)
     ARM_CMD_KEY = robot_topic(ROBOT_ID, "cmd/arm/target").strip('/')
     print(f"DEBUG: ARM_CMD_KEY = '{ARM_CMD_KEY}'")
     def _arm_cmd_listener(sample):
@@ -118,7 +118,7 @@ async def main():
             vec = from_zenoh_value(sample.payload, Vector2)
             arm_target = Vector2(x=float(vec.x), y=float(vec.y))
             last_arm_recv = time.monotonic()
-            print(f"Arm cmd: shoulder={arm_target.x:.3f} rev, elbow={arm_target.y:.3f} rev")
+            print(f"Arm cmd: shoulder={arm_target.x:.3f} rad, elbow={arm_target.y:.3f} rad")
         except Exception as e:
             print(f"Failed to parse arm command: {e}")
     arm_subscriber = session.declare_subscriber(ARM_CMD_KEY, _arm_cmd_listener)
@@ -126,7 +126,7 @@ async def main():
     
     # Publisher for state twist
     state_twist_pub = session.declare_publisher(STATE_TWIST_KEY)
-    # Publisher for arm state (Vector2: joint rotations)
+    # Publisher for arm state (Vector2: joint angles, radians)
     ARM_STATE_KEY = robot_topic(ROBOT_ID, "state/arm/position").strip('/')
     arm_state_pub = session.declare_publisher(ARM_STATE_KEY)
     
@@ -166,7 +166,7 @@ async def main():
                 # Command arm position and query state in same cycle (avoid query-only packet)
                 arm_state = None
                 if hardware is not None:
-                    print(f"Arm target: {arm_target.x}, {arm_target.y}")
+                    print(f"Arm target: {arm_target.x:.3f} rad, {arm_target.y:.3f} rad")
                     arm_state = await hardware.arm.set_targets(arm_target.x, arm_target.y, query=True)
                 
                 # Publish state if we got wheel velocities back
