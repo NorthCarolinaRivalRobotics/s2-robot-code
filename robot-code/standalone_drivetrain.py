@@ -109,7 +109,7 @@ async def main():
     _ = session.declare_subscriber(GYRO_KEY, zenoh_gyro_listener)
     
     # Arm command subscription (Vector2: x=shoulder, y=elbow in joint revolutions)
-    ARM_CMD_KEY = robot_topic(ROBOT_ID, "cmd/arm/target")
+    ARM_CMD_KEY = robot_topic(ROBOT_ID, "cmd/arm/target").strip('/')
     print(f"DEBUG: ARM_CMD_KEY = '{ARM_CMD_KEY}'")
     def _arm_cmd_listener(sample):
         global last_arm_recv, arm_target
@@ -127,7 +127,7 @@ async def main():
     # Publisher for state twist
     state_twist_pub = session.declare_publisher(STATE_TWIST_KEY)
     # Publisher for arm state (Vector2: joint rotations)
-    ARM_STATE_KEY = robot_topic(ROBOT_ID, "state/arm/position")
+    ARM_STATE_KEY = robot_topic(ROBOT_ID, "state/arm/position").strip('/')
     arm_state_pub = session.declare_publisher(ARM_STATE_KEY)
     
     print(f"Subscribed to {VELOCITY_KEY}")
