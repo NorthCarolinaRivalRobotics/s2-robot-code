@@ -9,3 +9,10 @@ nodes:
     params:
       robot_id: cash
       update_rate: 60.0  # Hz
+
+  # Placeholder wrist/claw node (time-based arrival estimate only)
+  - type: nodes.wrist_node.WristNode
+    params:
+      robot_id: cash
+      update_rate: 30.0
+      travel_speed: 1.0
