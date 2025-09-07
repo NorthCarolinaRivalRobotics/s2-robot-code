@@ -163,6 +163,7 @@ async def main():
                 # Command arm position and query state in same cycle (avoid query-only packet)
                 arm_state = None
                 if hardware is not None:
+                    print(f"Arm target: {arm_target.x}, {arm_target.y}")
                     arm_state = await hardware.arm.set_targets(arm_target.x, arm_target.y, query=True)
                 
                 # Publish state if we got wheel velocities back

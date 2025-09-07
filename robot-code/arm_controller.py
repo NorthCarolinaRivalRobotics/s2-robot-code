@@ -120,30 +120,5 @@ class ArmController:
         await self.set_targets(s, e)
         return (s, e)
 
-    async def query_positions(self) -> Tuple[float, float]:
-        """Return current joint positions (revolutions), based on motor positions."""
-        # Note: Prefer set_targets(..., query=True) in a control loop to avoid sending
-        # a query-only packet. This function remains for ad-hoc reads.
-        results = await self.transport.cycle([
-            self.servos[self.shoulder_id].make_position(
-                position=self._joint_to_motor(self._target_joint[self.shoulder_id], self.shoulder_id),
-                velocity=0.0, maximum_torque=self.max_torque_nm, velocity_limit=self.max_velocity_rps, query=True
-            ),
-            self.servos[self.elbow_id].make_position(
-                position=self._joint_to_motor(self._target_joint[self.elbow_id], self.elbow_id),
-                velocity=0.0, maximum_torque=self.max_torque_nm, velocity_limit=self.max_velocity_rps, query=True
-            ),
-        ])
-        joint_s = 0.0
-        joint_e = 0.0
-        for r in results:
-            rid = getattr(r, "id", None)
-            if moteus.Register.POSITION in r.values:
-                if rid == self.shoulder_id:
-                    joint_s = self._motor_to_joint(float(r.values[moteus.Register.POSITION]), self.shoulder_id)
-                elif rid == self.elbow_id:
-                    joint_e = self._motor_to_joint(float(r.values[moteus.Register.POSITION]), self.elbow_id)
-        return (joint_s, joint_e)
-
     async def stop(self) -> None:
         await self.transport.cycle([self.servos[self.shoulder_id].make_stop(), self.servos[self.elbow_id].make_stop()])

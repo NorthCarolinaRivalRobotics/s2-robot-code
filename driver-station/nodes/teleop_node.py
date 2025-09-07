@@ -104,10 +104,10 @@ class TeleopNode(BaseNode):
         self._last_transition_ts = 0.0
         self._debounce_s = float((config or {}).get('arm_button_debounce_s', 0.2))
         self._btn_prev: dict[str, bool] = {}
-        # Named poses (placeholders; will be tuned later)
+        # Named poses (placeholders; will be tuned later) shoulder, elbow
         self._pose_map = {
-            'STOW':        np.array([0.0, 0.0], dtype=float),
-            'PLACE_HEAD':  np.array([0.0, 0.0], dtype=float),
+            'STOW':        np.array([-0.15, 0.0], dtype=float),
+            'PLACE_HEAD':  np.array([-0.2, 0.0], dtype=float),
             'PLACE_SIDE':  np.array([0.0, 0.0], dtype=float),
             'CLAW_OPEN':   np.array([0.0, 0.0], dtype=float),
             'SILO_IN':     np.array([0.0, 0.0], dtype=float),
@@ -153,6 +153,8 @@ class TeleopNode(BaseNode):
         self.logger.info("  L2>0.5: GoTo SILO pose,  R2>0.5: GoTo GOAL pose")
         self.logger.info(f"  Arm step: {self.arm_step:.3f} rev, repeat every {self.arm_repeat_interval:.2f}s")
         self.logger.info(f"  Arm cmd topic: {self.arm_cmd_topic}")
+
+        self.is_first_arm_update = True
 
     def _on_odometry(self, sample):
         """Update the latest robot yaw from odometry (radians)."""
@@ -305,6 +307,7 @@ class TeleopNode(BaseNode):
     def _update_target_from_inputs(self, dt: float):
         """Adjust target pose using D-pad and L1/R1; Triangle seeds from current pose."""
         btn = self._read_buttons()
+        self.logger.info(f"Buttons: {btn}")
         if not btn:
             return
         # Seed target to current pose
@@ -347,6 +350,7 @@ class TeleopNode(BaseNode):
     def _update_arm_from_hat(self, now: float) -> None:
         """Use D-pad to increment arm joint targets with debouncing and slow repeat."""
         btn = self._read_buttons()
+        self.logger.info(f"Buttons: {btn}")
         if not btn:
             return
         hat = (int(btn.get('hat_x', 0)), int(btn.get('hat_y', 0)))
@@ -387,28 +391,34 @@ class TeleopNode(BaseNode):
         # Arm joints
         try:
             self.put(self.arm_cmd_topic, to_zenoh_value(Vector2(x=float(shoulder), y=float(elbow))))
+            self.logger.info(f"Published arm target: {shoulder}, {elbow}")
         except Exception:
-            pass
+            self.logger.info(f"Failed to publish arm target: {e}")
         # Wrist angle
         try:
             self.put(self.wrist_angle_topic, to_zenoh_value(float(wrist_angle)))
+            self.logger.info(f"Published wrist angle: {wrist_angle}")
         except Exception:
-            pass
+            self.logger.info(f"Failed to publish wrist angle: {e}")
         # Claw open/close
         try:
             self.put(self.claw_cmd_topic, to_zenoh_value(bool(claw_open)))
+            self.logger.info(f"Published claw open: {claw_open}")
         except Exception:
-            pass
+            self.logger.info(f"Failed to publish claw open: {e}")
 
     def _apply_arm_state(self):
         pose = self._pose_map.get(self._arm_state, np.array([0.0, 0.0], dtype=float))
         wrist = float(self._wrist_angle_map.get(self._arm_state, 0.0))
         claw = bool(self._claw_open_map.get(self._arm_state, False))
+        self.logger.info(f"Arm State to be sent: {self._arm_state} Pose: {pose} Wrist: {wrist} Claw: {claw}")
         self.arm_target[:] = pose
         self._arm_publish_targets(float(pose[0]), float(pose[1]), wrist, claw)
 
     def _update_arm_state_machine(self, now: float):
         btn = self._read_buttons() or {}
+        self.logger.info(f"Buttons: {btn}")
+
         # Debounce window
         if (now - self._last_transition_ts) < self._debounce_s:
             self._btn_prev = {k: bool(btn.get(k, False)) for k in ('square','cross','circle','triangle')}
@@ -421,7 +431,11 @@ class TeleopNode(BaseNode):
 
         # State transitions
         s = self._arm_state
-        transitioned = False
+        transitioned = False 
+        if self.is_first_arm_update:
+            self.is_first_arm_update = False
+            transitioned = True
+            return     
         # INIT -> STOW is implicit at startup (we start in STOW)
         if s == 'STOW':
             if pressed('triangle'):
@@ -449,7 +463,7 @@ class TeleopNode(BaseNode):
 
         if transitioned:
             self._last_transition_ts = now
-            self._apply_arm_state()
+        self._apply_arm_state()
 
         # Save for edge detection next time
         self._btn_prev = {k: bool(btn.get(k, False)) for k in ('square','cross','circle','triangle')}
@@ -496,6 +510,7 @@ class TeleopNode(BaseNode):
     def step(self):
         """Main processing loop."""
         try:
+            self.logger.info(f"Arm State: {self._arm_state}")
             now = time.time()
             # Read controller inputs
             inputs = self._read_controller_inputs()
