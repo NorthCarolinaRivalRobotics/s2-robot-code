@@ -47,8 +47,8 @@ class ArmController:
             elbow_id: moteus.Controller(id=elbow_id, transport=self.transport),
         }
 
-        # Zero offsets: motor revolutions to treat as joint=0.0
-        self._motor_zero = {shoulder_id: 0.0, elbow_id: 0.0}
+        # # Zero offsets: motor revolutions to treat as joint=0.0
+        # self._motor_zero = {shoulder_id: 0.0, elbow_id: 0.0}
 
         # Target positions in joint revolutions (persist last command)
         self._target_joint = {shoulder_id: 0.0, elbow_id: 0.0}
@@ -64,12 +64,13 @@ class ArmController:
             rid = getattr(r, "id", None)
             if rid in self._motor_zero and moteus.Register.POSITION in r.values:
                 self._motor_zero[rid] = float(r.values[moteus.Register.POSITION])
+        print(f"DEBUG: Motor zero: {self._motor_zero}")
 
     def _joint_to_motor(self, joint_revs: float, motor_id: int) -> float:
-        return self._motor_zero[motor_id] + joint_revs * self.gear_ratio
+        return joint_revs * self.gear_ratio
 
     def _motor_to_joint(self, motor_revs: float, motor_id: int) -> float:
-        return (motor_revs - self._motor_zero[motor_id]) / self.gear_ratio
+        return (motor_revs) / self.gear_ratio
 
     async def set_targets(self, shoulder_joint_revs: float, elbow_joint_revs: float, *, query: bool = False) -> Tuple[float, float] | None:
         """Command both joints to target joint rotations (revs).

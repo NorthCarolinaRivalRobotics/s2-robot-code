@@ -35,6 +35,7 @@ from rerun_adapters import (
     tide_quat_to_rr_rotation,
     pose2d_to_transform,
     normalize_angle,
+    tide_vec2_to_tuple,
 )
 
 
@@ -56,6 +57,7 @@ class RerunVizNode(BaseNode):
         self.twist_topic = robot_topic(self.robot_id, "state/twist")
         self.imu_quat_topic = robot_topic(self.robot_id, "sensor/imu/quat")
         self.target_topic = robot_topic(self.robot_id, "ui/target_pose2d")
+        self.arm_pos_topic = robot_topic(self.robot_id, "state/arm/position")
 
         # Whether to integrate twist if odometry is absent
         self.integrate_twist_if_needed = False
@@ -86,6 +88,8 @@ class RerunVizNode(BaseNode):
             self.subscribe(self.twist_topic, self._on_twist)
         # Optional target pose for visualization
         self.subscribe(self.target_topic, self._on_target_pose)
+        # Arm joint state (Vector2: x=shoulder revs, y=elbow revs)
+        self.subscribe(self.arm_pos_topic, self._on_arm_position)
 
         # State for visualization
         self._last_pose = np.array([0.0, 0.0, 0.0])  # x, y, yaw
@@ -95,6 +99,7 @@ class RerunVizNode(BaseNode):
         self._imu_yaw = None  # float
         self._trail_points = deque(maxlen=self.trail_length)  # world-frame (x,y,0) points
         self._target_pose = None  # np.array([x,y,yaw])
+        self._arm_pos: Optional[tuple[float, float]] = None  # (shoulder_rev, elbow_rev)
 
         # Robot geometry (in meters): 12in x 12in x 8in
         self.robot_size = (0.3048, 0.3048, 0.2032)
@@ -169,6 +174,15 @@ class RerunVizNode(BaseNode):
         except Exception as e:
             logger.error(f"Failed to parse target pose: {e}")
 
+    def _on_arm_position(self, sample):
+        """Handle arm joint position Vector2: x=shoulder revs, y=elbow revs."""
+        try:
+            # Accept Tide Vector2 or Mapping
+            shoulder, elbow = tide_vec2_to_tuple(sample)
+            self._arm_pos = (float(shoulder), float(elbow))
+        except Exception as e:
+            logger.error(f"Failed to parse arm position: {e}")
+
     # ---- Main loop ----
     def step(self):
         # Use odometry pose exclusively for transform & alignment
@@ -200,6 +214,13 @@ class RerunVizNode(BaseNode):
             hx = tx + math.cos(tyaw) * arrow_len
             hy = ty + math.sin(tyaw) * arrow_len
             rr.log("world/target/heading", rr.LineStrips3D([[(float(tx), float(ty), 0.01), (float(hx), float(hy), 0.01)]]))
+
+        # Plot arm joint positions as time series scalars (revolutions)
+        if self._arm_pos is not None:
+            shoulder_rev, elbow_rev = self._arm_pos
+            base = f"plots/{self.robot_id}/arm"
+            rr.log(base + "/shoulder_rev", rr.Scalars(float(shoulder_rev)))
+            rr.log(base + "/elbow_rev", rr.Scalars(float(elbow_rev)))
 
     def cleanup(self):
         logger.info("RerunVizNode shutting down")
