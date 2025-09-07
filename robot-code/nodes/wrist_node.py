@@ -62,9 +62,9 @@ class WristNode(BaseNode):
         self.wrist_channel = int(cfg.get("wrist_channel", 0))
         self.claw_channel = int(cfg.get("claw_channel", 1))
 
-        # Servo pulse bounds (PCA9685 tick counts, 0..4095). Defaults are conservative.
-        self.servo_min = int(cfg.get("servo_min", 500))
-        self.servo_max = int(cfg.get("servo_max", 2500))
+        # Servo pulse bounds (PCA9685 tick counts, 0..4095). Typical ~150..600 at 60Hz.
+        self.servo_min = int(cfg.get("servo_min", 150))
+        self.servo_max = int(cfg.get("servo_max", 600))
 
         # Wrist mechanical range in radians mapped linearly to [servo_min, servo_max]
         self.wrist_min_rad = float(cfg.get("wrist_min_rad", 0.0))
@@ -96,6 +96,11 @@ class WristNode(BaseNode):
                 self.pwm = Adafruit_PCA9685.PCA9685(address=self.pca_addr, busnum=self.pca_busnum)
                 self.pwm.set_pwm_freq(self.pwm_freq)
                 logger.info(f"PCA9685 ready addr=0x{self.pca_addr:02X} bus={self.pca_busnum} freq={self.pwm_freq}Hz")
+                if self.servo_min > 1000 or self.servo_max > 1000:
+                    logger.warning(
+                        "servo_min/servo_max look high. Values are PCA9685 ticks (0..4095). "
+                        "Typical hobby range is ~150..600 at 60Hz."
+                    )
             except Exception as e:
                 logger.warning(f"PCA9685 init failed; running without hardware control: {e}")
                 self.pwm = None

@@ -316,8 +316,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--freq", type=int, default=60, help="PWM frequency (Hz)")
     ap.add_argument("--wrist", type=int, default=0, help="Wrist servo channel")
     ap.add_argument("--claw", type=int, default=1, help="Claw servo channel")
-    ap.add_argument("--servo-min", dest="servo_min", type=int, default=500, help="Servo min pulse (ticks)")
-    ap.add_argument("--servo-max", dest="servo_max", type=int, default=2500, help="Servo max pulse (ticks)")
+    # Typical hobby servo range at ~60Hz is around 150..600 ticks
+    ap.add_argument("--servo-min", dest="servo_min", type=int, default=150, help="Servo min pulse (ticks)")
+    ap.add_argument("--servo-max", dest="servo_max", type=int, default=600, help="Servo max pulse (ticks)")
     ap.add_argument("--wrist-min", dest="wrist_min", type=float, default=0.0, help="Wrist min angle (rad)")
     ap.add_argument("--wrist-max", dest="wrist_max", type=float, default=np.pi, help="Wrist max angle (rad)")
     ap.add_argument("--open-norm", dest="open_norm", type=float, default=0.65, help="Claw open normalized position")
@@ -328,6 +329,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
+    # Heuristic: If user passed values that look like microseconds (e.g., 500/2500), warn.
+    if args.servo_min > 1000 or args.servo_max > 1000:
+        print(
+            "WARN: servo_min/servo_max look high. Values are PCA9685 ticks (0..4095).\n"
+            "      Typical range is ~150..600 at 60Hz. Use --servo-min/--servo-max accordingly."
+        )
     cfg = TunerConfig(
         address=args.addr,
         busnum=args.bus,
@@ -349,4 +356,3 @@ def main(argv: list[str]) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
-
