@@ -61,8 +61,8 @@ class TeleopNode(BaseNode):
         self.odom_topic = robot_topic(self.robot_id, "state/pose2d")
         self.target_topic = robot_topic(self.robot_id, "ui/target_pose2d")
         # Arm target topic (Vector2: x=shoulder revs, y=elbow revs)
-        # Strip leading slash to match robot subscriber keys in standalone_drivetrain
-        self.arm_cmd_topic = robot_topic(self.robot_id, "cmd/arm/target").lstrip('/')
+        # Use absolute topic to match the rest of the stack
+        self.arm_cmd_topic = robot_topic(self.robot_id, "cmd/arm/target")
         # Wrist/claw command topics (native Tide nodes use full path)
         self.wrist_angle_topic = robot_topic(self.robot_id, "cmd/wrist/angle")
         self.claw_cmd_topic = robot_topic(self.robot_id, "cmd/wrist/claw")
@@ -391,8 +391,8 @@ class TeleopNode(BaseNode):
         # Arm joints
         try:
             self.put(self.arm_cmd_topic, to_zenoh_value(Vector2(x=float(shoulder), y=float(elbow))))
-            self.logger.info(f"Published arm target: {shoulder}, {elbow}")
-        except Exception:
+            self.logger.info(f"Published arm target: {shoulder}, {elbow} to topic '{self.arm_cmd_topic}'")
+        except Exception as e:
             self.logger.info(f"Failed to publish arm target: {e}")
         # Wrist angle
         try:
