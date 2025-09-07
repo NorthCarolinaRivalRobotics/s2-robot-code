@@ -105,15 +105,21 @@ class TeleopNode(BaseNode):
         self._debounce_s = float((config or {}).get('arm_button_debounce_s', 0.2))
         self._btn_prev: dict[str, bool] = {}
         # Named poses (placeholders; will be tuned later) shoulder, elbow
+        # arm straight out is (0.0, pi)
+        UP = np.pi/2.0
+
+
         self._pose_map = {
-            'STOW':        np.array([-0.15, 0.0], dtype=float),
-            'PLACE_HEAD':  np.array([-0.2, 0.0], dtype=float),
-            'PLACE_SIDE':  np.array([0.0, 0.0], dtype=float),
-            'CLAW_OPEN':   np.array([0.0, 0.0], dtype=float),
-            'SILO_IN':     np.array([0.0, 0.0], dtype=float),
-            'GROUND_IN':   np.array([0.0, 0.0], dtype=float),
+            "UP": np.array([UP, UP], dtype=float),
+            'STOW':        np.array([np.deg2rad(25.0), np.deg2rad(270.0)], dtype=float),
+            'PLACE_HEAD':  np.array([UP + np.deg2rad(10.0), UP + np.deg2rad(45.0)], dtype=float),
+            'PLACE_SIDE':  np.array([UP + np.deg2rad(-10.0), UP + np.deg2rad(10.0)], dtype=float),
+            'CLAW_OPEN':   np.array([UP + np.deg2rad(10.0), UP + np.deg2rad(45.0)], dtype=float),
+            'SILO_IN':     np.array([UP - np.deg2rad(35.0), np.deg2rad(220.0)], dtype=float),
+            'GROUND_IN':   np.array([UP - np.deg2rad(35.0), np.deg2rad(220.0)], dtype=float),
         }
         self._wrist_angle_map = {
+            'UP': 0.0,
             'STOW': 0.0,
             'PLACE_HEAD': 0.0,
             'PLACE_SIDE': 0.0,
@@ -122,6 +128,7 @@ class TeleopNode(BaseNode):
             'GROUND_IN': 0.0,
         }
         self._claw_open_map = {
+            'UP': False,
             'STOW': False,
             'PLACE_HEAD': False,
             'PLACE_SIDE': False,
@@ -449,6 +456,12 @@ class TeleopNode(BaseNode):
                 self._arm_state = 'SILO_IN'; transitioned = True
             elif pressed('cross'):
                 self._arm_state = 'STOW'; transitioned = True
+        elif s == 'UP':
+            if pressed('direction_down'):
+                self._arm_state = 'STOW'; transitioned = True
+
+        if pressed('direction_up'):
+            self._arm_state = 'UP'; transitioned = True
 
         if transitioned:
             self._last_transition_ts = now
