@@ -321,8 +321,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--servo-max", dest="servo_max", type=int, default=600, help="Servo max pulse (ticks)")
     ap.add_argument("--wrist-min", dest="wrist_min", type=float, default=0.0, help="Wrist min angle (rad)")
     ap.add_argument("--wrist-max", dest="wrist_max", type=float, default=np.pi, help="Wrist max angle (rad)")
-    ap.add_argument("--open-norm", dest="open_norm", type=float, default=0.65, help="Claw open normalized position")
-    ap.add_argument("--closed-norm", dest="closed_norm", type=float, default=0.35, help="Claw closed normalized position")
+    ap.add_argument("--open-norm", dest="open_norm", type=float, default=0.1, help="Claw open normalized position")
+    ap.add_argument("--closed-norm", dest="closed_norm", type=float, default=0.55, help="Claw closed normalized position")
     ap.add_argument("--dry-run", action="store_true", help="Do not access hardware; print only")
     return ap.parse_args(argv)
 
