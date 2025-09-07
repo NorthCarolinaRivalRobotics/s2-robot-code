@@ -6,7 +6,7 @@ import time
 import board
 from adafruit_motor import servo
 
-from adafruit_pca9685 import PCA9685
+from Adafruit_PCA9685 import PCA9685
 
 i2c = board.I2C()  # uses board.SCL and board.SDA
 # i2c = busio.I2C(board.GP1, board.GP0)    # Pi Pico RP2040
