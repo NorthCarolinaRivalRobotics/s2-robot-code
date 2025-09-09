@@ -4,6 +4,7 @@ import math
 import moteus
 import moteus_pi3hat
 from typing import Optional, Tuple
+import numpy as np
 
 
 class ArmController:
@@ -26,7 +27,7 @@ class ArmController:
         transport: Optional[moteus_pi3hat.Pi3HatRouter] = None,
         servo_bus_map: Optional[dict] = None,
         gear_ratio: float = 10.0,
-        max_torque_nm: float = 1.0,
+        max_torque_nm: float = 1.1,
         max_velocity_rps: float = 2.0,
     ) -> None:
         # Transport can be shared; create if not provided
@@ -96,7 +97,7 @@ class ArmController:
                 position=self._angle_to_motor(shoulder_angle_rad, self.shoulder_id),
                 velocity=0.0,
                 maximum_torque=self.max_torque_nm,
-                velocity_limit=self.max_velocity_rps,
+                velocity_limit=np.nan,
                 query=query,
             )
         )
@@ -105,7 +106,7 @@ class ArmController:
                 position=self._angle_to_motor(elbow_angle_rad, self.elbow_id),
                 velocity=0.0,
                 maximum_torque=self.max_torque_nm,
-                velocity_limit=self.max_velocity_rps,
+                velocity_limit=np.nan,
                 query=query,
             )
         )
