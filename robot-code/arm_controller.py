@@ -28,8 +28,8 @@ class ArmController:
         servo_bus_map: Optional[dict] = None,
         gear_ratio: float = 10.0,
         max_torque_nm: float = 1.0,
-        max_velocity_rps: float = 20.0,
-        max_acceleration_rps2: float = 10.0,
+        max_velocity_rps: float = 40.0,
+        max_acceleration_rps2: float = 40.0,
     ) -> None:
         # Transport can be shared; create if not provided
         if transport is not None:
