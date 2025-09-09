@@ -102,6 +102,24 @@ wheels = [
 ]
 
 [[package]]
+name = "adafruit-gpio"
+version = "1.0.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "adafruit-pureio" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/db/1c/2dc8a674514219f287fa344e44cadfd77b3e2878d6ff602a8c2149b50dd8/Adafruit_GPIO-1.0.3.tar.gz", hash = "sha256:d6465b92c866c51ca8f3bc1e8f2ec36f5ccdb46d0fd54101c1109756d4a2dcd0", size = 24522, upload-time = "2017-06-06T18:44:52.234Z" }
+
+[[package]]
+name = "adafruit-pca9685"
+version = "1.0.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "adafruit-gpio" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f6/33/ea998d02bab6f51c43ed99e3345ff7642aa0ceac871aff8cb8850f0dde05/Adafruit_PCA9685-1.0.1.tar.gz", hash = "sha256:24d632c912a23f44416369555f3f39f2509975b89d37955f125bc009040a1dfd", size = 2950, upload-time = "2016-10-19T01:48:55.727Z" }
+
+[[package]]
 name = "adafruit-platformdetect"
 version = "3.82.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1049,6 +1067,7 @@ laptop = [
 ]
 robot = [
     { name = "adafruit-circuitpython-bno055" },
+    { name = "adafruit-pca9685" },
     { name = "moteus-pi3hat" },
     { name = "rpi-gpio" },
 ]
@@ -1056,6 +1075,7 @@ robot = [
 [package.metadata]
 requires-dist = [
     { name = "adafruit-circuitpython-bno055", marker = "extra == 'robot'", specifier = ">=5.4.20" },
+    { name = "adafruit-pca9685", marker = "extra == 'robot'", specifier = ">=1.0.1" },
     { name = "matplotlib", specifier = ">=3.10.6" },
     { name = "moteus-pi3hat", marker = "extra == 'robot'", specifier = ">=0.3.31" },
     { name = "pygame", marker = "extra == 'laptop'", specifier = ">=2.6.1" },

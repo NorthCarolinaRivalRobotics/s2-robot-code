@@ -111,31 +111,34 @@ class TeleopNode(BaseNode):
 
         self._pose_map = {
             "UP": np.array([UP, UP], dtype=float),
-            'STOW':        np.array([np.deg2rad(25.0), np.deg2rad(270.0)], dtype=float),
+            'STOW':        np.array([UP - np.deg2rad(35.0), np.deg2rad(270.0)], dtype=float),
             'PLACE_HEAD':  np.array([UP + np.deg2rad(10.0), UP + np.deg2rad(45.0)], dtype=float),
             'PLACE_SIDE':  np.array([UP + np.deg2rad(-10.0), UP + np.deg2rad(10.0)], dtype=float),
-            'CLAW_OPEN':   np.array([UP + np.deg2rad(10.0), UP + np.deg2rad(45.0)], dtype=float),
-            'SILO_IN':     np.array([UP - np.deg2rad(35.0), np.deg2rad(220.0)], dtype=float),
-            'GROUND_IN':   np.array([UP - np.deg2rad(35.0), np.deg2rad(220.0)], dtype=float),
+            'RELEASE':     np.array([UP + np.deg2rad(10.0), UP + np.deg2rad(45.0)], dtype=float),
+            'SILO_IN':     np.array([UP - np.deg2rad(10.0), np.deg2rad(250.0)], dtype=float),
+            'GROUND_IN':   np.array([np.deg2rad(65.0), np.deg2rad(220.0)], dtype=float),
         }
         self._wrist_angle_map = {
-            'UP': 0.0,
-            'STOW': 0.0,
-            'PLACE_HEAD': 0.0,
-            'PLACE_SIDE': 0.0,
-            'CLAW_OPEN': 0.0,
-            'SILO_IN': 0.0,
-            'GROUND_IN': 0.0,
+            'UP': np.pi/2.0,
+            'STOW': np.pi,
+            'PLACE_HEAD': np.pi/2.0,
+            'PLACE_SIDE': np.pi/2.0,
+            'RELEASE': np.pi/2.0,
+            'SILO_IN': np.deg2rad(90 + 75.0),
+            'GROUND_IN': np.deg2rad(45.0),
         }
         self._claw_open_map = {
             'UP': False,
             'STOW': False,
             'PLACE_HEAD': False,
             'PLACE_SIDE': False,
-            'CLAW_OPEN': True,
-            'SILO_IN': False,
-            'GROUND_IN': False,
+            'RELEASE': True,
+            'SILO_IN': True,
+            'GROUND_IN': True,
         }
+        # Claw toggle state (decoupled from arm state machine)
+        self._claw_open = False
+        self._rb_prev = False  # right bumper previous state for edge detection
         # Trigger press latches
         self._l2_active = False
         self._r2_active = False
@@ -155,7 +158,8 @@ class TeleopNode(BaseNode):
         self.logger.info("  D-Pad Up/Down: Elbow +/− small step")
         self.logger.info("  Triangle: Place (head-on)")
         self.logger.info("  Square: Place (side)")
-        self.logger.info("  Circle: Open claw / toggle intakes")
+        self.logger.info("  Right bumper: Toggle claw open/close")
+        self.logger.info("  Circle: Toggle intakes")
         self.logger.info("  Cross: Advance (open->silo) or Stow from intakes")
         self.logger.info("  L2>0.5: GoTo SILO pose,  R2>0.5: GoTo GOAL pose")
         self.logger.info(f"  Arm step: {self.arm_step:.3f} rev, repeat every {self.arm_repeat_interval:.2f}s")
@@ -297,6 +301,8 @@ class TeleopNode(BaseNode):
                 'direction_up': bool(buttons.get(11, 0)),
                 'direction_left': bool(buttons.get(13, 0)),
                 'direction_right': bool(buttons.get(14, 0)),
+                'left_bumper': bool(buttons.get(9, 0)),
+                'right_bumper': bool(buttons.get(10, 0)),
             }
         except Exception as e:
             self.logger.debug(f"Button read error: {e}")
@@ -399,7 +405,7 @@ class TeleopNode(BaseNode):
             self.put(self.wrist_angle_topic, to_zenoh_value(float(wrist_angle)))
         except Exception:
             self.logger.info(f"Failed to publish wrist angle: {e}")
-        # Claw open/close
+        # Claw open/close (driven elsewhere via toggle)
         try:
             self.put(self.claw_cmd_topic, to_zenoh_value(bool(claw_open)))
         except Exception:
@@ -408,7 +414,8 @@ class TeleopNode(BaseNode):
     def _apply_arm_state(self):
         pose = self._pose_map.get(self._arm_state, np.array([0.0, 0.0], dtype=float))
         wrist = float(self._wrist_angle_map.get(self._arm_state, 0.0))
-        claw = bool(self._claw_open_map.get(self._arm_state, False))
+        # Use independent claw toggle state rather than state machine map
+        claw = bool(self._claw_open)
         self.arm_target[:] = pose
         self._arm_publish_targets(float(pose[0]), float(pose[1]), wrist, claw)
 
@@ -442,8 +449,8 @@ class TeleopNode(BaseNode):
                 self._arm_state = 'GROUND_IN'; transitioned = True
         elif s in ('PLACE_HEAD', 'PLACE_SIDE'):
             if pressed('circle'):
-                self._arm_state = 'CLAW_OPEN'; transitioned = True
-        elif s == 'CLAW_OPEN':
+                self._arm_state = 'RELEASE'; transitioned = True
+        elif s == 'RELEASE':
             if pressed('cross'):
                 self._arm_state = 'SILO_IN'; transitioned = True
         elif s == 'SILO_IN':
@@ -527,6 +534,21 @@ class TeleopNode(BaseNode):
             else:
                 dt = max(now - self._last_time, 1e-6)
             self._last_time = now
+
+            # Claw toggle on right bumper (edge-triggered)
+            try:
+                btn = self._read_buttons() or {}
+                rb_now = bool(btn.get('right_bumper', False))
+                if rb_now and not self._rb_prev:
+                    self._claw_open = not self._claw_open
+                    try:
+                        self.put(self.claw_cmd_topic, to_zenoh_value(bool(self._claw_open)))
+                        self.logger.info(f"Claw toggled: {'OPEN' if self._claw_open else 'CLOSED'}")
+                    except Exception as e:
+                        self.logger.info(f"Failed to publish claw toggle: {e}")
+                self._rb_prev = rb_now
+            except Exception as e:
+                self.logger.debug(f"Claw toggle handling error: {e}")
 
             # Update target editing from buttons (and publish)
             self._update_target_from_inputs(dt)

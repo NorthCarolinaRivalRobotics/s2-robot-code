@@ -42,7 +42,7 @@ class ArmController:
         self.gear_ratio = gear_ratio
         self.max_torque_nm = max_torque_nm
         self.max_velocity_rps = max_velocity_rps
-
+        self.max_acceleration_rps2 = max_acceleration_rps2
         # Controllers
         self.servos = {
             shoulder_id: moteus.Controller(id=shoulder_id, transport=self.transport),
