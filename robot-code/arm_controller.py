@@ -112,7 +112,7 @@ class ArmController:
         cmds.append(
             self.servos[self.shoulder_id].make_position(
                 position=self._angle_to_motor(shoulder_angle_rad, self.shoulder_id),
-                velocity=endpoint_vel_rps,
+                velocity=-endpoint_vel_rps,
                 maximum_torque=self.max_torque_nm,
                 velocity_limit=np.nan,
                 accel_limit=self.max_acceleration_rps2,
