@@ -104,6 +104,8 @@ class TeleopNode(BaseNode):
         self._last_transition_ts = 0.0
         self._debounce_s = float((config or {}).get('arm_button_debounce_s', 0.2))
         self._btn_prev: dict[str, bool] = {}
+
+        self._wrist_travel_timer = ElapsedTimer(0.25)
         # Named poses (placeholders; will be tuned later) shoulder, elbow
         # arm straight out is (0.0, pi)
         UP = np.pi/2.0
@@ -113,29 +115,26 @@ class TeleopNode(BaseNode):
             "UP": np.array([UP, UP], dtype=float),
             'STOW':        np.array([UP - np.deg2rad(35.0), np.deg2rad(270.0)], dtype=float),
             'PLACE_HEAD':  np.array([UP + np.deg2rad(10.0), UP + np.deg2rad(45.0)], dtype=float),
+            'PLACE_HEAD_WRIST_TRAVEL': np.array([UP + np.deg2rad(10.0), np.deg2rad(230.0)], dtype=float),
             'PLACE_SIDE':  np.array([UP + np.deg2rad(-10.0), UP + np.deg2rad(10.0)], dtype=float),
-            'RELEASE':     np.array([UP + np.deg2rad(10.0), UP + np.deg2rad(45.0)], dtype=float),
-            'SILO_IN':     np.array([UP - np.deg2rad(10.0), np.deg2rad(250.0)], dtype=float),
-            'GROUND_IN':   np.array([np.deg2rad(65.0), np.deg2rad(220.0)], dtype=float),
+            'PLACE_SIDE_WRIST_TRAVEL': np.array([UP + np.deg2rad(10.0), np.deg2rad(230.0)], dtype=float),
+            'RELEASE':     np.array([UP + np.deg2rad(10.0), np.deg2rad(250.0)], dtype=float),
+            'SILO_IN':     np.array([UP - np.deg2rad(35.0), np.deg2rad(250.0)], dtype=float),
+            'GROUND_IN':   np.array([UP - np.deg2rad(55.0), np.deg2rad(280.0)], dtype=float),
         }
+
         self._wrist_angle_map = {
             'UP': np.pi/2.0,
             'STOW': np.pi,
             'PLACE_HEAD': np.pi/2.0,
+            'PLACE_HEAD_WRIST_TRAVEL': np.pi,
             'PLACE_SIDE': np.pi/2.0,
+            'PLACE_SIDE_WRIST_TRAVEL': np.pi,
             'RELEASE': np.pi/2.0,
             'SILO_IN': np.deg2rad(90 + 75.0),
-            'GROUND_IN': np.deg2rad(45.0),
+            'GROUND_IN': np.deg2rad(90 + 75.0),
         }
-        self._claw_open_map = {
-            'UP': False,
-            'STOW': False,
-            'PLACE_HEAD': False,
-            'PLACE_SIDE': False,
-            'RELEASE': True,
-            'SILO_IN': True,
-            'GROUND_IN': True,
-        }
+
         # Claw toggle state (decoupled from arm state machine)
         self._claw_open = False
         self._rb_prev = False  # right bumper previous state for edge detection
@@ -442,11 +441,16 @@ class TeleopNode(BaseNode):
         # INIT -> STOW is implicit at startup (we start in STOW)
         if s == 'STOW':
             if pressed('triangle'):
-                self._arm_state = 'PLACE_HEAD'; transitioned = True
+                self._arm_state = 'PLACE_HEAD_WRIST_TRAVEL'; transitioned = True; self._wrist_travel_timer.reset()
             elif pressed('square'):
-                self._arm_state = 'PLACE_SIDE'; transitioned = True
+                self._arm_state = 'PLACE_SIDE_WRIST_TRAVEL'; transitioned = True; self._wrist_travel_timer.reset()
             elif pressed('circle'):
                 self._arm_state = 'GROUND_IN'; transitioned = True
+            elif pressed('cross'):
+                self._arm_state = 'SILO_IN'; transitioned = True
+        elif s == 'PLACE_HEAD_WRIST_TRAVEL' or s == 'PLACE_SIDE_WRIST_TRAVEL':
+            if self._wrist_travel_timer.elapsed():
+                self._arm_state = 'PLACE_HEAD' if s == 'PLACE_HEAD_WRIST_TRAVEL' else 'PLACE_SIDE'; transitioned = True
         elif s in ('PLACE_HEAD', 'PLACE_SIDE'):
             if pressed('circle'):
                 self._arm_state = 'RELEASE'; transitioned = True
@@ -632,3 +636,15 @@ class TeleopNode(BaseNode):
 def clipped_cos(x):
     x = max(min(x, np.pi/2), -np.pi/2)
     return math.cos(x)
+
+
+class ElapsedTimer:
+    def __init__(self, duration_s: float):
+        self.duration_s = duration_s
+        self.start_ts = time.time()
+
+    def elapsed(self) -> bool:
+        return time.time() - self.start_ts >= self.duration_s
+    
+    def reset(self):
+        self.start_ts = time.time()
