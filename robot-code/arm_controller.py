@@ -84,7 +84,14 @@ class ArmController:
         joint_revs = (motor_revs - self._motor_zero[motor_id]) / self.gear_ratio
         return joint_revs * (2.0 * math.pi)
 
-    async def set_targets(self, shoulder_angle_rad: float, elbow_angle_rad: float, *, query: bool = False) -> Tuple[float, float] | None:
+    async def set_targets(
+        self,
+        shoulder_angle_rad: float,
+        elbow_angle_rad: float,
+        *,
+        end_velocity_frac: float | None = None,
+        query: bool = False,
+    ) -> Tuple[float, float] | None:
         """Command both joints to target joint angles (radians).
 
         If query=True, returns a tuple (shoulder_angle_rad, elbow_angle_rad) from the same cycle results.
@@ -92,11 +99,20 @@ class ArmController:
         self._target_angle[self.shoulder_id] = shoulder_angle_rad
         self._target_angle[self.elbow_id] = elbow_angle_rad
 
+        # Determine desired endpoint velocity for the trajectory in motor rev/s.
+        # If unspecified, default to 0.0 for a stop at the target.
+        if end_velocity_frac is None:
+            endpoint_vel_rps = 0.0
+        else:
+            # Clamp to [0, 1] and scale by configured max velocity.
+            f = max(0.0, min(1.0, float(end_velocity_frac)))
+            endpoint_vel_rps = f * float(self.max_velocity_rps)
+
         cmds = []
         cmds.append(
             self.servos[self.shoulder_id].make_position(
                 position=self._angle_to_motor(shoulder_angle_rad, self.shoulder_id),
-                velocity=0.0,
+                velocity=endpoint_vel_rps,
                 maximum_torque=self.max_torque_nm,
                 velocity_limit=np.nan,
                 accel_limit=self.max_acceleration_rps2,
@@ -106,7 +122,7 @@ class ArmController:
         cmds.append(
             self.servos[self.elbow_id].make_position(
                 position=self._angle_to_motor(elbow_angle_rad, self.elbow_id),
-                velocity=0.0,
+                velocity=endpoint_vel_rps,
                 maximum_torque=self.max_torque_nm,
                 velocity_limit=np.nan,
                 accel_limit=self.max_acceleration_rps2,

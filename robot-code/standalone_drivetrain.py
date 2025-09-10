@@ -15,7 +15,7 @@ from tide import CmdTopic, StateTopic, robot_topic
 
 # Import Tide models and serialization
 try:
-    from tide.models import Twist2D, Vector2, Vector3
+from tide.models import Twist2D, Vector2, Vector3
     from tide.models.serialization import to_zenoh_value, from_zenoh_value
 except ImportError:
     print("Error: tide-sdk package not found. Install with: pip install tide-sdk")
@@ -52,6 +52,8 @@ drive: MecanumDrive | None = None
 
 # Arm control state (radians). Initialize to +pi/2 so no motion on startup.
 arm_target = Vector2(x=math.pi/2, y=math.pi/2)  # shoulder, elbow in radians
+# End-velocity fraction for arm waypoint (0..1). 0.0 means stop at waypoint.
+arm_end_velocity_frac: float = 0.0
 ARM_CMD_TIMEOUT = 2.0
 last_arm_recv = 0.0
 
@@ -112,13 +114,24 @@ async def main():
     ARM_CMD_KEY = robot_topic(ROBOT_ID, "cmd/arm/target").strip('/')
     print(f"DEBUG: ARM_CMD_KEY = '{ARM_CMD_KEY}'")
     def _arm_cmd_listener(sample):
-        global last_arm_recv, arm_target
+        global last_arm_recv, arm_target, arm_end_velocity_frac
         print(f"DEBUG: Received arm command on topic '{sample.key_expr}'")
         try:
-            vec = from_zenoh_value(sample.payload, Vector2)
-            arm_target = Vector2(x=float(vec.x), y=float(vec.y))
+            # Prefer Vector3 (x=shoulder rad, y=elbow rad, z=end_velocity_frac)
+            try:
+                vec3 = from_zenoh_value(sample.payload, Vector3)
+                arm_target = Vector2(x=float(vec3.x), y=float(vec3.y))
+                arm_end_velocity_frac = max(0.0, min(1.0, float(vec3.z)))
+            except Exception:
+                # Fallback to legacy Vector2 without velocity (defaults to 0 end velocity)
+                vec2 = from_zenoh_value(sample.payload, Vector2)
+                arm_target = Vector2(x=float(vec2.x), y=float(vec2.y))
+                arm_end_velocity_frac = 0.0
             last_arm_recv = time.monotonic()
-            print(f"Arm cmd: shoulder={arm_target.x:.3f} rad, elbow={arm_target.y:.3f} rad")
+            print(
+                f"Arm cmd: shoulder={arm_target.x:.3f} rad, elbow={arm_target.y:.3f} rad, "
+                f"end_vel_frac={arm_end_velocity_frac:.2f}"
+            )
         except Exception as e:
             print(f"Failed to parse arm command: {e}")
     arm_subscriber = session.declare_subscriber(ARM_CMD_KEY, _arm_cmd_listener)
@@ -167,7 +180,12 @@ async def main():
                 arm_state = None
                 if hardware is not None:
                     print(f"Arm target: {arm_target.x:.3f} rad, {arm_target.y:.3f} rad")
-                    arm_state = await hardware.arm.set_targets(arm_target.x, arm_target.y, query=True)
+                    arm_state = await hardware.arm.set_targets(
+                        arm_target.x,
+                        arm_target.y,
+                        end_velocity_frac=arm_end_velocity_frac,
+                        query=True,
+                    )
                 
                 # Publish state if we got wheel velocities back
                 if wheel_velocities:
