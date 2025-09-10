@@ -14,12 +14,9 @@ import json
 from tide import CmdTopic, StateTopic, robot_topic
 
 # Import Tide models and serialization
-try:
 from tide.models import Twist2D, Vector2, Vector3
-    from tide.models.serialization import to_zenoh_value, from_zenoh_value
-except ImportError:
-    print("Error: tide-sdk package not found. Install with: pip install tide-sdk")
-    sys.exit(1)
+from tide.models.serialization import to_zenoh_value, from_zenoh_value
+
 
 # Add current directory to path to import mecanum_drive
 sys.path.append(os.path.dirname(__file__))
