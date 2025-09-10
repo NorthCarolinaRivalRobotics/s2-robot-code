@@ -118,7 +118,7 @@ async def main():
             try:
                 vec3 = from_zenoh_value(sample.payload, Vector3)
                 arm_target = Vector2(x=float(vec3.x), y=float(vec3.y))
-                arm_end_velocity_frac = max(0.0, min(1.0, float(vec3.z)))
+                arm_end_velocity_frac = float(vec3.z)
             except Exception:
                 # Fallback to legacy Vector2 without velocity (defaults to 0 end velocity)
                 vec2 = from_zenoh_value(sample.payload, Vector2)
