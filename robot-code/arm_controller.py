@@ -105,7 +105,7 @@ class ArmController:
             endpoint_vel_rps = 0.0
         else:
             # Clamp to [0, 1] and scale by configured max velocity.
-            f = max(0.0, min(1.0, float(end_velocity_frac)))
+            f = float(end_velocity_frac)
             endpoint_vel_rps = f * float(self.max_velocity_rps)
 
         cmds = []
