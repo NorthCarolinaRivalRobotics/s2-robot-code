@@ -71,8 +71,8 @@ class WristNode(BaseNode):
         self.wrist_max_rad = float(cfg.get("wrist_max_rad", np.pi))
 
         # Claw open/close positions as normalized [0..1] in the servo travel
-        self.claw_open_norm = float(cfg.get("claw_open_norm", 0.1))
-        self.claw_closed_norm = float(cfg.get("claw_closed_norm", 0.55))
+        self.claw_open_norm = float(cfg.get("claw_open_norm", 0.600))
+        self.claw_closed_norm = float(cfg.get("claw_closed_norm", 0.250))
 
         # Topics
         self.cmd_angle_topic = robot_topic(self.robot_id, "cmd/wrist/angle")
