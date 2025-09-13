@@ -36,6 +36,7 @@ from rerun_adapters import (
     pose2d_to_transform,
     normalize_angle,
     tide_vec2_to_tuple,
+    tide_vec3_to_tuple,
 )
 
 
@@ -58,6 +59,7 @@ class RerunVizNode(BaseNode):
         self.imu_quat_topic = robot_topic(self.robot_id, "sensor/imu/quat")
         self.target_topic = robot_topic(self.robot_id, "ui/target_pose2d")
         self.arm_pos_topic = robot_topic(self.robot_id, "state/arm/position")
+        self.arm_cmd_topic = robot_topic(self.robot_id, "cmd/arm/target")
 
         # Whether to integrate twist if odometry is absent
         self.integrate_twist_if_needed = False
@@ -90,6 +92,8 @@ class RerunVizNode(BaseNode):
         self.subscribe(self.target_topic, self._on_target_pose)
         # Arm joint state (Vector2: x=shoulder revs, y=elbow revs)
         self.subscribe(self.arm_pos_topic, self._on_arm_position)
+        # Arm target commands (Vector3 preferred; Vector2 fallback)
+        self.subscribe(self.arm_cmd_topic, self._on_arm_target)
 
         # State for visualization
         self._last_pose = np.array([0.0, 0.0, 0.0])  # x, y, yaw
@@ -100,6 +104,7 @@ class RerunVizNode(BaseNode):
         self._trail_points = deque(maxlen=self.trail_length)  # world-frame (x,y,0) points
         self._target_pose = None  # np.array([x,y,yaw])
         self._arm_pos: Optional[tuple[float, float]] = None  # (shoulder_rev, elbow_rev)
+        self._arm_target: Optional[tuple[float, float]] = None  # (shoulder_target, elbow_target)
 
         # Robot geometry (in meters): 12in x 12in x 8in
         self.robot_size = (0.3048, 0.3048, 0.2032)
@@ -183,6 +188,19 @@ class RerunVizNode(BaseNode):
         except Exception as e:
             logger.error(f"Failed to parse arm position: {e}")
 
+    def _on_arm_target(self, sample):
+        """Handle arm joint target Vector3/Vector2: x=shoulder, y=elbow (radians)."""
+        try:
+            # Prefer Vector3 (x,y,z) but accept Vector2
+            try:
+                sx, sy, _ = tide_vec3_to_tuple(sample)
+                shoulder, elbow = sx, sy
+            except Exception:
+                shoulder, elbow = tide_vec2_to_tuple(sample)
+            self._arm_target = (float(shoulder), float(elbow))
+        except Exception as e:
+            logger.error(f"Failed to parse arm target: {e}")
+
     # ---- Main loop ----
     def step(self):
         # Use odometry pose exclusively for transform & alignment
@@ -221,6 +239,12 @@ class RerunVizNode(BaseNode):
             base = f"plots/{self.robot_id}/arm"
             rr.log(base + "/shoulder_rev", rr.Scalars(float(shoulder_rev)))
             rr.log(base + "/elbow_rev", rr.Scalars(float(elbow_rev)))
+        # Plot arm joint targets as time series scalars (radians)
+        if self._arm_target is not None:
+            t_shoulder, t_elbow = self._arm_target
+            base = f"plots/{self.robot_id}/arm"
+            rr.log(base + "/shoulder_target", rr.Scalars(float(t_shoulder)))
+            rr.log(base + "/elbow_target", rr.Scalars(float(t_elbow)))
 
     def cleanup(self):
         logger.info("RerunVizNode shutting down")

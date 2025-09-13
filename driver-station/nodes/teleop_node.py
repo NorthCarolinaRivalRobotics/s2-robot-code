@@ -9,11 +9,17 @@ import time
 import logging
 import math
 import numpy as np
+from tide.core.utils import add_project_root_to_path
+
+add_project_root_to_path(__file__)
+# Use the acceleration limiter from GoTo node
+
+from .goto_node import apply_acceleration_limit, Twist2dVelocity
 
 from tide.core.node import BaseNode
 from tide.namespaces import robot_topic
 from tide import CmdTopic
-from tide.models import Twist2D, Vector2, Pose2D
+from tide.models import Twist2D, Vector2, Vector3, Pose2D
 from tide.core.geometry import SE2, SO2
 from tide.models.serialization import to_zenoh_value
 
@@ -51,6 +57,11 @@ class TeleopNode(BaseNode):
             self.deadzone = config.get("deadzone", self.deadzone)
             self.field_relative = config.get("field_relative", self.field_relative)
             # No PD gains here; TeleopNode only handles manual control and UI
+            # Arm position proximity tolerance (radians) for state transitions
+            # If not provided, default to ~3 degrees.
+            self.arm_pos_tol_rad = float(config.get("arm_position_tolerance_rad", math.radians(3.0)))
+        else:
+            self.arm_pos_tol_rad = math.radians(3.0)
         
         # Set update rate
         self.hz = self.update_rate
@@ -63,6 +74,8 @@ class TeleopNode(BaseNode):
         # Arm target topic (Vector2: x=shoulder revs, y=elbow revs)
         # Use absolute topic to match the rest of the stack
         self.arm_cmd_topic = robot_topic(self.robot_id, "cmd/arm/target")
+        # Arm state topic (Vector2: x=shoulder rad, y=elbow rad)
+        self.arm_pos_topic = robot_topic(self.robot_id, "state/arm/position")
         # Wrist/claw command topics (native Tide nodes use full path)
         self.wrist_angle_topic = robot_topic(self.robot_id, "cmd/wrist/angle")
         self.claw_cmd_topic = robot_topic(self.robot_id, "cmd/wrist/claw")
@@ -79,6 +92,10 @@ class TeleopNode(BaseNode):
         self._prev_pose = None
         self._prev_pose_ts = None
         self.subscribe(self.odom_topic, self._on_odometry)
+        # Arm joint position subscription
+        self._arm_pos: tuple[float, float] | None = None  # (shoulder_rad, elbow_rad)
+        self._arm_pos_ts: float | None = None
+        self.subscribe(self.arm_pos_topic, self._on_arm_position)
         
         # Initialize logging
         self.logger = logging.getLogger(f"Teleop_{self.robot_id}")
@@ -98,6 +115,8 @@ class TeleopNode(BaseNode):
         self.arm_repeat_interval = (config or {}).get('arm_repeat_interval', 0.3)  # seconds
         self._arm_last_hat = (0, 0)
         self._arm_last_emit = 0.0
+        # Arm intermediate end-velocity fraction (0..1) used for travel waypoints
+        self.arm_intermediate_end_velocity_frac = float((config or {}).get('arm_intermediate_end_velocity_frac', -0.1))
 
         # Arm state machine
         self._arm_state = 'STOW'  # INIT -> STOW immediately at start
@@ -105,7 +124,12 @@ class TeleopNode(BaseNode):
         self._debounce_s = float((config or {}).get('arm_button_debounce_s', 0.2))
         self._btn_prev: dict[str, bool] = {}
 
-        self._wrist_travel_timer = ElapsedTimer(0.25)
+        # Intermediate travel fallback timer (position-based transition preferred)
+        # Increase to 3.0s so that a fallback is obvious if it triggers.
+        self._wrist_travel_timer = ElapsedTimer(0.35)
+        # Intermediate crossing detection state
+        self._intermediate_target: np.ndarray | None = None
+        self._intermediate_prev_err: tuple[float, float] | None = None
         # Named poses (placeholders; will be tuned later) shoulder, elbow
         # arm straight out is (0.0, pi)
         UP = np.pi/2.0
@@ -115,11 +139,11 @@ class TeleopNode(BaseNode):
             "UP": np.array([UP, UP], dtype=float),
             'STOW':        np.array([UP - np.deg2rad(35.0), np.deg2rad(270.0)], dtype=float),
             'PLACE_HEAD':  np.array([UP + np.deg2rad(10.0), UP + np.deg2rad(45.0)], dtype=float),
-            'PLACE_HEAD_WRIST_TRAVEL': np.array([UP + np.deg2rad(10.0), np.deg2rad(230.0)], dtype=float),
+            'PLACE_HEAD_WRIST_TRAVEL': np.array([UP + np.deg2rad(0.0), np.deg2rad(200.0)], dtype=float),
             'PLACE_SIDE':  np.array([UP + np.deg2rad(-10.0), UP + np.deg2rad(10.0)], dtype=float),
-            'PLACE_SIDE_WRIST_TRAVEL': np.array([UP + np.deg2rad(10.0), np.deg2rad(230.0)], dtype=float),
-            'RELEASE':     np.array([UP + np.deg2rad(10.0), np.deg2rad(250.0)], dtype=float),
-            'SILO_IN':     np.array([UP - np.deg2rad(35.0), np.deg2rad(250.0)], dtype=float),
+            'PLACE_SIDE_WRIST_TRAVEL': np.array([UP + np.deg2rad(15.0), np.deg2rad(230.0)], dtype=float),
+            'RELEASE':     np.array([UP + np.deg2rad(15.0), np.deg2rad(200.0)], dtype=float),
+            'SILO_IN':     np.array([UP - np.deg2rad(22.0), np.deg2rad(255.0)], dtype=float),
             'GROUND_IN':   np.array([UP - np.deg2rad(55.0), np.deg2rad(280.0)], dtype=float),
         }
 
@@ -130,9 +154,9 @@ class TeleopNode(BaseNode):
             'PLACE_HEAD_WRIST_TRAVEL': np.pi,
             'PLACE_SIDE': np.pi/2.0,
             'PLACE_SIDE_WRIST_TRAVEL': np.pi,
-            'RELEASE': np.pi/2.0,
-            'SILO_IN': np.deg2rad(90 + 75.0),
-            'GROUND_IN': np.deg2rad(90 + 75.0),
+            'RELEASE': np.pi,
+            'SILO_IN': np.deg2rad(90 + 55.0),
+            'GROUND_IN': np.deg2rad(90 + 55.0),
         }
 
         # Claw toggle state (decoupled from arm state machine)
@@ -165,6 +189,17 @@ class TeleopNode(BaseNode):
         self.logger.info(f"  Arm cmd topic: {self.arm_cmd_topic}")
 
         self.is_first_arm_update = True
+
+    def _on_arm_position(self, sample):
+        """Handle arm joint position Vector2: x=shoulder rad, y=elbow rad."""
+        try:
+            print("case 2")
+            shoulder = float(sample["x"])  # type: ignore[index]
+            elbow = float(sample["y"])    # type: ignore[index]
+            self._arm_pos = (shoulder, elbow)
+            self._arm_pos_ts = time.time()
+        except Exception as e:
+            self.logger.debug(f"Failed to parse arm position: {e}")
 
     def _on_odometry(self, sample):
         """Update the latest robot yaw from odometry (radians)."""
@@ -343,16 +378,16 @@ class TeleopNode(BaseNode):
             self.target_pose[2] += rot_speed * dt
             self.has_target = True
         # Start/Cancel goto: publish UI events for GoToPositionNode
-        if btn.get('square') and self.has_target:
-            try:
-                self.put(self.goto_start_topic, to_zenoh_value(True))
-            except Exception as e:
-                self.logger.debug(f"Failed to publish goto start: {e}")
-        if btn.get('cross'):
-            try:
-                self.put(self.goto_cancel_topic, to_zenoh_value(True))
-            except Exception as e:
-                self.logger.debug(f"Failed to publish goto cancel: {e}")
+        # if btn.get('square') and self.has_target:
+        #     try:
+        #         self.put(self.goto_start_topic, to_zenoh_value(True))
+        #     except Exception as e:
+        #         self.logger.debug(f"Failed to publish goto start: {e}")
+        # if btn.get('cross'):
+        #     try:
+        #         self.put(self.goto_cancel_topic, to_zenoh_value(True))
+        #     except Exception as e:
+        #         self.logger.debug(f"Failed to publish goto cancel: {e}")
         # Always publish target if available
         self._publish_target()
 
@@ -387,16 +422,24 @@ class TeleopNode(BaseNode):
         self.arm_target[0] += d_shoulder
         self.arm_target[1] += d_elbow
         try:
-            self.put(self.arm_cmd_topic, to_zenoh_value(Vector2(x=float(self.arm_target[0]), y=float(self.arm_target[1]))))
+            # Publish as Vector3 with zero end-velocity for manual nudges.
+            self.put(
+                self.arm_cmd_topic,
+                to_zenoh_value(Vector3(x=float(self.arm_target[0]), y=float(self.arm_target[1]), z=0.0)),
+            )
         except Exception as e:
             self.logger.debug(f"Failed to publish arm target: {e}")
         self._arm_last_hat = hat
         self._arm_last_emit = now
 
-    def _arm_publish_targets(self, shoulder: float, elbow: float, wrist_angle: float, claw_open: bool):
+    def _arm_publish_targets(self, shoulder: float, elbow: float, wrist_angle: float, claw_open: bool, *, end_velocity_frac: float = 0.0):
         # Arm joints
         try:
-            self.put(self.arm_cmd_topic, to_zenoh_value(Vector2(x=float(shoulder), y=float(elbow))))
+            # Publish desired end-velocity fraction in z for intermediate waypoints
+            self.put(
+                self.arm_cmd_topic,
+                to_zenoh_value(Vector3(x=float(shoulder), y=float(elbow), z=float(end_velocity_frac))),
+            )
         except Exception as e:
             self.logger.info(f"Failed to publish arm target: {e}")
         # Wrist angle
@@ -416,7 +459,65 @@ class TeleopNode(BaseNode):
         # Use independent claw toggle state rather than state machine map
         claw = bool(self._claw_open)
         self.arm_target[:] = pose
-        self._arm_publish_targets(float(pose[0]), float(pose[1]), wrist, claw)
+        # Use non-zero end velocity on travel waypoints to smooth transitions
+        # Include RELEASE so it can flow-through to SILO_IN automatically
+        if self._arm_state in ("PLACE_HEAD_WRIST_TRAVEL", "PLACE_SIDE_WRIST_TRAVEL", "RELEASE"):
+            evf = self.arm_intermediate_end_velocity_frac
+        else:
+            evf = 0.0
+        self._arm_publish_targets(float(pose[0]), float(pose[1]), wrist, claw, end_velocity_frac=evf)
+
+    def _begin_intermediate_monitor(self, state_name: str):
+        """Initialize crossing detection for an intermediate waypoint state."""
+        tgt = self._pose_map.get(state_name)
+        self._intermediate_target = tgt.copy() if tgt is not None else None
+        if self._arm_pos is not None and self._intermediate_target is not None:
+            s_err = float(self._intermediate_target[0]) - float(self._arm_pos[0])
+            e_err = float(self._intermediate_target[1]) - float(self._arm_pos[1])
+            self._intermediate_prev_err = (s_err, e_err)
+            self.logger.debug(
+                f"Intermediate monitor start: target=({self._intermediate_target[0]:.3f}, {self._intermediate_target[1]:.3f}), "
+                f"err=({s_err:.3f}, {e_err:.3f})"
+            )
+        else:
+            self._intermediate_prev_err = None
+
+    def _clear_intermediate_monitor(self):
+        self._intermediate_target = None
+        self._intermediate_prev_err = None
+
+    def _arm_crossed_intermediate(self) -> bool:
+        """Return True if each joint error changed sign relative to previous reading.
+
+        Uses zero-crossing of error (target - measured). Requires at least one
+        previous reading; updates the stored previous error each call.
+        """
+        if self._arm_pos is None or self._intermediate_target is None:
+            return False
+        s_err = float(self._intermediate_target[0]) - float(self._arm_pos[0])
+        e_err = float(self._intermediate_target[1]) - float(self._arm_pos[1])
+        crossed = False
+        if self._intermediate_prev_err is not None:
+            ps, pe = self._intermediate_prev_err
+            # Consider zero or sign flip as crossing
+            s_cross = (ps > 0 and s_err <= 0) or (ps < 0 and s_err >= 0) or s_err == 0.0
+            e_cross = (pe > 0 and e_err <= 0) or (pe < 0 and e_err >= 0) or e_err == 0.0
+            crossed = bool(s_cross or e_cross)
+            if crossed:
+                self.logger.info(
+                    f"Arm crossed intermediate: prev_err=({ps:.3f},{pe:.3f}) curr_err=({s_err:.3f},{e_err:.3f})"
+                )
+        # Update previous for next iteration
+        self._intermediate_prev_err = (s_err, e_err)
+        return crossed
+
+    def _arm_near_target(self, target: np.ndarray) -> bool:
+        """Return True if measured arm joints are within tolerance of target (radians)."""
+        if self._arm_pos is None:
+            return False
+        shoulder_err = abs(float(self._arm_pos[0]) - float(target[0]))
+        elbow_err = abs(float(self._arm_pos[1]) - float(target[1]))
+        return shoulder_err <= self.arm_pos_tol_rad and elbow_err <= self.arm_pos_tol_rad
 
     def _update_arm_state_machine(self, now: float):
         btn = self._read_buttons() or {}
@@ -441,32 +542,49 @@ class TeleopNode(BaseNode):
         # INIT -> STOW is implicit at startup (we start in STOW)
         if s == 'STOW':
             if pressed('triangle'):
-                self._arm_state = 'PLACE_HEAD_WRIST_TRAVEL'; transitioned = True; self._wrist_travel_timer.reset()
+                self._arm_state = 'PLACE_HEAD_WRIST_TRAVEL'; transitioned = True; self._wrist_travel_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
             elif pressed('square'):
-                self._arm_state = 'PLACE_SIDE_WRIST_TRAVEL'; transitioned = True; self._wrist_travel_timer.reset()
+                self._arm_state = 'PLACE_SIDE_WRIST_TRAVEL'; transitioned = True; self._wrist_travel_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
             elif pressed('circle'):
                 self._arm_state = 'GROUND_IN'; transitioned = True
             elif pressed('cross'):
                 self._arm_state = 'SILO_IN'; transitioned = True
         elif s == 'PLACE_HEAD_WRIST_TRAVEL' or s == 'PLACE_SIDE_WRIST_TRAVEL':
-            if self._wrist_travel_timer.elapsed():
-                self._arm_state = 'PLACE_HEAD' if s == 'PLACE_HEAD_WRIST_TRAVEL' else 'PLACE_SIDE'; transitioned = True
+            # Prefer crossing-based transition; use 3s timer as obvious fallback
+            if self._arm_crossed_intermediate():
+                self.logger.info("Arm crossed intermediate target; advancing to PLACE state")
+                self._arm_state = 'PLACE_HEAD' if s == 'PLACE_HEAD_WRIST_TRAVEL' else 'PLACE_SIDE'; transitioned = True; self._clear_intermediate_monitor()
+            elif self._wrist_travel_timer.elapsed():
+                self.logger.warning("Fallback: wrist travel timer elapsed (3s); advancing state")
+                self._arm_state = 'PLACE_HEAD' if s == 'PLACE_HEAD_WRIST_TRAVEL' else 'PLACE_SIDE'; transitioned = True; self._clear_intermediate_monitor()
         elif s in ('PLACE_HEAD', 'PLACE_SIDE'):
             if pressed('circle'):
-                self._arm_state = 'RELEASE'; transitioned = True
+                self._arm_state = 'RELEASE'; transitioned = True; self._wrist_travel_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
         elif s == 'RELEASE':
-            if pressed('cross'):
-                self._arm_state = 'SILO_IN'; transitioned = True
+            # Prefer crossing-based transition; use timer as fallback; allow manual advance on Cross
+            if self._arm_crossed_intermediate():
+                self.logger.info("Arm crossed RELEASE; advancing to STOW")
+                self._arm_state = 'STOW'; transitioned = True; self._clear_intermediate_monitor()
+            elif self._wrist_travel_timer.elapsed():
+                self.logger.warning("Fallback: RELEASE timer elapsed; advancing to STOW")
+                self._arm_state = 'STOW'; transitioned = True; self._clear_intermediate_monitor()
+            elif pressed('cross'):
+                self._arm_state = 'STOW'; transitioned = True; self._clear_intermediate_monitor()
         elif s == 'SILO_IN':
             if pressed('circle'):
                 self._arm_state = 'GROUND_IN'; transitioned = True
             elif pressed('cross'):
                 self._arm_state = 'STOW'; transitioned = True
+            elif pressed('triangle'):
+                self._arm_state = 'PLACE_HEAD_WRIST_TRAVEL'; transitioned = True; self._wrist_travel_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
+
         elif s == 'GROUND_IN':
             if pressed('circle'):
                 self._arm_state = 'SILO_IN'; transitioned = True
             elif pressed('cross'):
                 self._arm_state = 'STOW'; transitioned = True
+            elif pressed('triangle'):
+                self._arm_state = 'PLACE_SIDE_WRIST_TRAVEL'; transitioned = True; self._wrist_travel_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
         elif s == 'UP':
             if pressed('direction_down'):
                 self._arm_state = 'STOW'; transitioned = True
@@ -591,9 +709,10 @@ class TeleopNode(BaseNode):
                     self._teleop_active = False
                 # Do not continuously publish zeros; allow mux to select autonomy
             else:
-                # Inputs active: publish at rate and mark active
+                # Inputs active: apply acceleration limiting and publish
                 self._teleop_active = True
-                twist_msg = self._create_twist_message(linear_x, linear_y, angular_z)
+                limited = apply_acceleration_limit(Twist2dVelocity(linear_x, linear_y, angular_z), dt)
+                twist_msg = self._create_twist_message(limited.vx, limited.vy, limited.w)
                 self.put(self.twist_topic, to_zenoh_value(twist_msg))
             
             # Log status periodically
