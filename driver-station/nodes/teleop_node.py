@@ -24,6 +24,12 @@ from tide.core.geometry import SE2, SO2
 from tide.models.serialization import to_zenoh_value
 
 
+CLAW_CLOSED = "CLOSED"
+CLAW_OPEN = "OPEN"
+CLAW_SPEAR = "SPEAR"
+_CLAW_STATES = {CLAW_CLOSED, CLAW_OPEN, CLAW_SPEAR}
+
+
 class TeleopNode(BaseNode):
     """
     A simple teleop node for controlling robot movement with PS5 controller.
@@ -138,13 +144,13 @@ class TeleopNode(BaseNode):
         self._pose_map = {
             "UP": np.array([UP, UP], dtype=float),
             'STOW':        np.array([UP - np.deg2rad(35.0), np.deg2rad(270.0)], dtype=float),
-            'PLACE_HEAD':  np.array([UP + np.deg2rad(10.0), UP + np.deg2rad(45.0)], dtype=float),
+            'PLACE_HEAD':  np.array([UP + np.deg2rad(12.0), UP + np.deg2rad(47.0)], dtype=float),
             'PLACE_HEAD_WRIST_TRAVEL': np.array([UP + np.deg2rad(0.0), np.deg2rad(200.0)], dtype=float),
             'PLACE_SIDE':  np.array([UP + np.deg2rad(-10.0), UP + np.deg2rad(10.0)], dtype=float),
             'PLACE_SIDE_WRIST_TRAVEL': np.array([UP + np.deg2rad(15.0), np.deg2rad(230.0)], dtype=float),
             'RELEASE':     np.array([UP + np.deg2rad(15.0), np.deg2rad(200.0)], dtype=float),
-            'SILO_IN':     np.array([UP - np.deg2rad(22.0), np.deg2rad(255.0)], dtype=float),
-            'GROUND_IN':   np.array([UP - np.deg2rad(55.0), np.deg2rad(280.0)], dtype=float),
+            'GROUND_IN_PARALLEL':     np.array([UP - np.deg2rad(55.0), np.deg2rad(280.0)], dtype=float),
+            'GROUND_IN_PERPENDICULAR':   np.array([UP - np.deg2rad(32.0), np.deg2rad(260.0)], dtype=float),
         }
 
         self._wrist_angle_map = {
@@ -155,13 +161,14 @@ class TeleopNode(BaseNode):
             'PLACE_SIDE': np.pi/2.0,
             'PLACE_SIDE_WRIST_TRAVEL': np.pi,
             'RELEASE': np.pi,
-            'SILO_IN': np.deg2rad(90 + 55.0),
-            'GROUND_IN': np.deg2rad(90 + 55.0),
+            'GROUND_IN_PARALLEL': np.deg2rad(90 + 55.0),
+            'GROUND_IN_PERPENDICULAR': np.deg2rad(90 - 10.0),
         }
 
-        # Claw toggle state (decoupled from arm state machine)
-        self._claw_open = False
+        # Claw state (decoupled from arm state machine)
+        self._claw_state = CLAW_CLOSED
         self._rb_prev = False  # right bumper previous state for edge detection
+        self._lb_prev = False  # left bumper previous state for edge detection
         # Trigger press latches
         self._l2_active = False
         self._r2_active = False
@@ -181,6 +188,7 @@ class TeleopNode(BaseNode):
         self.logger.info("  D-Pad Up/Down: Elbow +/− small step")
         self.logger.info("  Triangle: Place (head-on)")
         self.logger.info("  Square: Place (side)")
+        self.logger.info("  Left bumper: Spear claw (toggle spear/closed)")
         self.logger.info("  Right bumper: Toggle claw open/close")
         self.logger.info("  Circle: Toggle intakes")
         self.logger.info("  Cross: Advance (open->silo) or Stow from intakes")
@@ -432,7 +440,7 @@ class TeleopNode(BaseNode):
         self._arm_last_hat = hat
         self._arm_last_emit = now
 
-    def _arm_publish_targets(self, shoulder: float, elbow: float, wrist_angle: float, claw_open: bool, *, end_velocity_frac: float = 0.0):
+    def _arm_publish_targets(self, shoulder: float, elbow: float, wrist_angle: float, claw_state: str, *, end_velocity_frac: float = 0.0):
         # Arm joints
         try:
             # Publish desired end-velocity fraction in z for intermediate waypoints
@@ -445,27 +453,44 @@ class TeleopNode(BaseNode):
         # Wrist angle
         try:
             self.put(self.wrist_angle_topic, to_zenoh_value(float(wrist_angle)))
-        except Exception:
+        except Exception as e:
             self.logger.info(f"Failed to publish wrist angle: {e}")
-        # Claw open/close (driven elsewhere via toggle)
+        # Claw command (driven elsewhere via toggle)
+        self._publish_claw_state(claw_state)
+
+    def _publish_claw_state(self, state: str, *, log: bool = False) -> None:
+        if state not in _CLAW_STATES:
+            self.logger.debug(f"Ignoring unknown claw state '{state}'")
+            return
         try:
-            self.put(self.claw_cmd_topic, to_zenoh_value(bool(claw_open)))
-        except Exception:
-            self.logger.info(f"Failed to publish claw open: {e}")
+            self.put(self.claw_cmd_topic, to_zenoh_value(state))
+            if log:
+                self.logger.info(f"Claw set to {state}")
+        except Exception as e:
+            self.logger.info(f"Failed to publish claw state '{state}': {e}")
+
+    def _set_claw_state(self, state: str, *, log: bool = True) -> None:
+        if state not in _CLAW_STATES:
+            self.logger.debug(f"Ignoring attempt to set unknown claw state '{state}'")
+            return
+        if self._claw_state == state:
+            return
+        self._claw_state = state
+        self._publish_claw_state(state, log=log)
 
     def _apply_arm_state(self):
         pose = self._pose_map.get(self._arm_state, np.array([0.0, 0.0], dtype=float))
         wrist = float(self._wrist_angle_map.get(self._arm_state, 0.0))
         # Use independent claw toggle state rather than state machine map
-        claw = bool(self._claw_open)
+        claw_state = self._claw_state
         self.arm_target[:] = pose
         # Use non-zero end velocity on travel waypoints to smooth transitions
-        # Include RELEASE so it can flow-through to SILO_IN automatically
+        # Include RELEASE so it can flow-through to GROUND_IN_PARALLEL automatically
         if self._arm_state in ("PLACE_HEAD_WRIST_TRAVEL", "PLACE_SIDE_WRIST_TRAVEL", "RELEASE"):
             evf = self.arm_intermediate_end_velocity_frac
         else:
             evf = 0.0
-        self._arm_publish_targets(float(pose[0]), float(pose[1]), wrist, claw, end_velocity_frac=evf)
+        self._arm_publish_targets(float(pose[0]), float(pose[1]), wrist, claw_state, end_velocity_frac=evf)
 
     def _begin_intermediate_monitor(self, state_name: str):
         """Initialize crossing detection for an intermediate waypoint state."""
@@ -546,9 +571,9 @@ class TeleopNode(BaseNode):
             elif pressed('square'):
                 self._arm_state = 'PLACE_SIDE_WRIST_TRAVEL'; transitioned = True; self._wrist_travel_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
             elif pressed('circle'):
-                self._arm_state = 'GROUND_IN'; transitioned = True
+                self._arm_state = 'GROUND_IN_PERPENDICULAR'; transitioned = True
             elif pressed('cross'):
-                self._arm_state = 'SILO_IN'; transitioned = True
+                self._arm_state = 'GROUND_IN_PARALLEL'; transitioned = True
         elif s == 'PLACE_HEAD_WRIST_TRAVEL' or s == 'PLACE_SIDE_WRIST_TRAVEL':
             # Prefer crossing-based transition; use 3s timer as obvious fallback
             if self._arm_crossed_intermediate():
@@ -570,17 +595,17 @@ class TeleopNode(BaseNode):
                 self._arm_state = 'STOW'; transitioned = True; self._clear_intermediate_monitor()
             elif pressed('cross'):
                 self._arm_state = 'STOW'; transitioned = True; self._clear_intermediate_monitor()
-        elif s == 'SILO_IN':
+        elif s == 'GROUND_IN_PARALLEL':
             if pressed('circle'):
-                self._arm_state = 'GROUND_IN'; transitioned = True
+                self._arm_state = 'GROUND_IN_PERPENDICULAR'; transitioned = True
             elif pressed('cross'):
                 self._arm_state = 'STOW'; transitioned = True
             elif pressed('triangle'):
                 self._arm_state = 'PLACE_HEAD_WRIST_TRAVEL'; transitioned = True; self._wrist_travel_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
 
-        elif s == 'GROUND_IN':
+        elif s == 'GROUND_IN_PERPENDICULAR':
             if pressed('circle'):
-                self._arm_state = 'SILO_IN'; transitioned = True
+                self._arm_state = 'GROUND_IN_PARALLEL'; transitioned = True
             elif pressed('cross'):
                 self._arm_state = 'STOW'; transitioned = True
             elif pressed('triangle'):
@@ -657,18 +682,24 @@ class TeleopNode(BaseNode):
                 dt = max(now - self._last_time, 1e-6)
             self._last_time = now
 
-            # Claw toggle on right bumper (edge-triggered)
+            # Claw toggle (edge-triggered)
             try:
                 btn = self._read_buttons() or {}
                 rb_now = bool(btn.get('right_bumper', False))
+                lb_now = bool(btn.get('left_bumper', False))
                 if rb_now and not self._rb_prev:
-                    self._claw_open = not self._claw_open
-                    try:
-                        self.put(self.claw_cmd_topic, to_zenoh_value(bool(self._claw_open)))
-                        self.logger.info(f"Claw toggled: {'OPEN' if self._claw_open else 'CLOSED'}")
-                    except Exception as e:
-                        self.logger.info(f"Failed to publish claw toggle: {e}")
+                    if self._claw_state == CLAW_SPEAR:
+                        target = CLAW_CLOSED
+                    elif self._claw_state == CLAW_OPEN:
+                        target = CLAW_CLOSED
+                    else:
+                        target = CLAW_OPEN
+                    self._set_claw_state(target)
+                if lb_now and not self._lb_prev:
+                    target = CLAW_SPEAR if self._claw_state != CLAW_SPEAR else CLAW_CLOSED
+                    self._set_claw_state(target)
                 self._rb_prev = rb_now
+                self._lb_prev = lb_now
             except Exception as e:
                 self.logger.debug(f"Claw toggle handling error: {e}")
 

@@ -17,6 +17,12 @@ from tide.namespaces import robot_topic
 from tide.models.serialization import to_zenoh_value
 
 
+CLAW_MODE_CLOSED = "CLOSED"
+CLAW_MODE_OPEN = "OPEN"
+CLAW_MODE_SPEAR = "SPEAR"
+_CLAW_MODES = {CLAW_MODE_CLOSED, CLAW_MODE_OPEN, CLAW_MODE_SPEAR}
+
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -29,6 +35,7 @@ except Exception:  # ImportError on dev machines without hardware
 class WristState:
     angle: float = 0.0
     claw_open: bool = False
+    claw_mode: str = CLAW_MODE_CLOSED
     busy: bool = False
     eta_ts: float = 0.0
 
@@ -73,6 +80,8 @@ class WristNode(BaseNode):
         # Claw open/close positions as normalized [0..1] in the servo travel
         self.claw_open_norm = float(cfg.get("claw_open_norm", 0.600))
         self.claw_closed_norm = float(cfg.get("claw_closed_norm", 0.250))
+        default_spear_norm = (self.claw_open_norm + self.claw_closed_norm) * 0.5
+        self.claw_spear_norm = float(cfg.get("claw_spear_norm", default_spear_norm))
 
         # Topics
         self.cmd_angle_topic = robot_topic(self.robot_id, "cmd/wrist/angle")
@@ -136,6 +145,32 @@ class WristNode(BaseNode):
         except Exception as e:
             logger.warning(f"Failed to set PWM on ch{channel}: {e}")
 
+    def _resolve_claw_mode(self, sample) -> str | None:
+        try:
+            if isinstance(sample, str):
+                text = sample.strip().upper()
+                if text in _CLAW_MODES:
+                    return text
+                if text in ("TRUE", "1"):
+                    return CLAW_MODE_OPEN
+                if text in ("FALSE", "0"):
+                    return CLAW_MODE_CLOSED
+            elif isinstance(sample, (bytes, bytearray)):
+                return self._resolve_claw_mode(sample.decode())
+            elif isinstance(sample, dict):
+                for key in ("mode", "state"):
+                    val = sample.get(key)
+                    if isinstance(val, str):
+                        resolved = self._resolve_claw_mode(val)
+                        if resolved is not None:
+                            return resolved
+            if isinstance(sample, bool):
+                return CLAW_MODE_OPEN if sample else CLAW_MODE_CLOSED
+            numeric = float(sample)
+            return CLAW_MODE_OPEN if numeric != 0.0 else CLAW_MODE_CLOSED
+        except Exception:
+            return None
+
     # --- Handlers ---
     def _on_cmd_angle(self, sample):
         try:
@@ -158,21 +193,30 @@ class WristNode(BaseNode):
         logger.info(f"Wrist angle cmd: {target:.3f} rad (pulse={pulse}), eta {travel:.2f}s")
 
     def _on_cmd_claw(self, sample):
-        try:
-            val = bool(sample if isinstance(sample, bool) else (float(sample) != 0.0))
-        except Exception:
+        mode = self._resolve_claw_mode(sample)
+        if mode is None:
             logger.debug(f"Invalid claw sample: {sample}")
             return
 
-        self._state.claw_open = val
-        norm = self.claw_open_norm if val else self.claw_closed_norm
+        if mode == CLAW_MODE_SPEAR:
+            self._state.claw_open = False
+            self._state.claw_mode = CLAW_MODE_SPEAR
+            norm = self.claw_spear_norm
+            log_label = CLAW_MODE_SPEAR
+        else:
+            is_open = mode == CLAW_MODE_OPEN
+            self._state.claw_open = is_open
+            self._state.claw_mode = CLAW_MODE_OPEN if is_open else CLAW_MODE_CLOSED
+            norm = self.claw_open_norm if is_open else self.claw_closed_norm
+            log_label = CLAW_MODE_OPEN if is_open else CLAW_MODE_CLOSED
+
         pulse = self._norm_to_pulse(norm)
         self._set_servo(self.claw_channel, pulse)
-        logger.info(f"Claw {'OPEN' if val else 'CLOSED'} (pulse={pulse})")
+        logger.info(f"Claw {log_label} (pulse={pulse})")
 
-        # Publish immediately
+        # Publish immediately (legacy bool state)
         try:
-            self.put(self.state_claw_topic, to_zenoh_value(val))
+            self.put(self.state_claw_topic, to_zenoh_value(self._state.claw_open))
         except Exception:
             pass
 
