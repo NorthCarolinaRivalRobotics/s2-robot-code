@@ -42,6 +42,7 @@ ROBOT_ID = "cash"
 VELOCITY_KEY = robot_topic(ROBOT_ID, CmdTopic.TWIST.value).strip('/')
 STATE_TWIST_KEY = robot_topic(ROBOT_ID, StateTopic.TWIST.value).strip('/')
 GYRO_KEY = robot_topic(ROBOT_ID, "sensor/imu/gyro").strip('/')
+POWER_STATE_KEY = robot_topic(ROBOT_ID, "state/power/dist").strip('/')
 
 # Hardware (shared transport for drivetrain + arm)
 hardware: MoteusHardware | None = None
@@ -53,6 +54,7 @@ arm_target = Vector2(x=math.pi/2, y=math.pi/2)  # shoulder, elbow in radians
 arm_end_velocity_frac: float = 0.0
 ARM_CMD_TIMEOUT = 2.0
 last_arm_recv = 0.0
+last_power_publish = 0.0
 
 def zenoh_velocity_listener(sample):
     """Callback for incoming velocity commands using Tide serialization."""
@@ -95,7 +97,7 @@ async def initialize_drive():
 
 async def main():
     """Main function - simple control loop following example_moteus_swerve.py pattern."""
-    global drive, reference_vx, reference_vy, reference_w, last_recv
+    global drive, reference_vx, reference_vy, reference_w, last_recv, last_power_publish
     
     print("Starting simplified standalone drivetrain controller...")
     
@@ -139,6 +141,8 @@ async def main():
     # Publisher for arm state (Vector2: joint angles, radians)
     ARM_STATE_KEY = robot_topic(ROBOT_ID, "state/arm/position").strip('/')
     arm_state_pub = session.declare_publisher(ARM_STATE_KEY)
+    # Publisher for power diagnostics (dict payload)
+    power_state_pub = session.declare_publisher(POWER_STATE_KEY)
     
     print(f"Subscribed to {VELOCITY_KEY}")
     print(f"Subscribed to {GYRO_KEY}")
@@ -218,6 +222,22 @@ async def main():
                     if step_count % 60 == 0:  # Log every 2 seconds at 30Hz
                         print(f"Driving: cmd=({reference_vx:.2f}, {reference_vy:.2f}, {reference_w:.2f}), "
                                 f"actual=({actual_vx:.2f}, {actual_vy:.2f}, {actual_w:.2f})")
+
+                # Publish power diagnostics at ~10 Hz if available
+                if hardware is not None and hardware.power_stream_ready:
+                    now = time.monotonic()
+                    if now - last_power_publish >= 0.1:
+                        try:
+                            power_data = await hardware.read_power_diagnostics()
+                        except Exception as exc:
+                            print(f"Failed to read power diagnostics: {exc}")
+                            power_data = None
+                        if power_data:
+                            try:
+                                power_state_pub.put(to_zenoh_value(power_data))
+                                last_power_publish = now
+                            except Exception as exc:
+                                print(f"Failed to publish power diagnostics: {exc}")
             
             except Exception as e:
                 print(f"Error executing drive command: {e}")

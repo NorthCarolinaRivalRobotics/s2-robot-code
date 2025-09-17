@@ -14,3 +14,7 @@ Instructions to run:
 Due to the permissions needed for motor control the sudo is very important. 
 
 At this point you should be able to drive the robot 
+
+on the robot in 1 terminal run:
+
+`sudo uv run standalone_drivetrain.py`

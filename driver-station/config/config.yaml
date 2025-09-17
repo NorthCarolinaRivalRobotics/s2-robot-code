@@ -54,4 +54,5 @@ nodes:
       odom_topic: "/cash/state/pose2d"
       twist_topic: "/cash/state/twist"
       imu_quat_topic: "/cash/sensor/imu/quat"
+      power_topic: "/cash/state/power/dist"
       integrate_twist_if_needed: false

@@ -60,6 +60,7 @@ class RerunVizNode(BaseNode):
         self.target_topic = robot_topic(self.robot_id, "ui/target_pose2d")
         self.arm_pos_topic = robot_topic(self.robot_id, "state/arm/position")
         self.arm_cmd_topic = robot_topic(self.robot_id, "cmd/arm/target")
+        self.power_topic = robot_topic(self.robot_id, "state/power/dist")
 
         # Whether to integrate twist if odometry is absent
         self.integrate_twist_if_needed = False
@@ -75,6 +76,7 @@ class RerunVizNode(BaseNode):
             self.integrate_twist_if_needed = config.get("integrate_twist_if_needed", self.integrate_twist_if_needed)
             self.trail_length = int(config.get("trail_length", self.trail_length))
             self.heading_line_length = float(config.get("heading_line_length", self.heading_line_length))
+            self.power_topic = config.get("power_topic", robot_topic(self.robot_id, "state/power/dist"))
 
         # Rerun setup: spawn viewer window and set an app id
         rr.init(f"DriverStation-Rerun-{self.robot_id}", spawn=True)
@@ -94,6 +96,8 @@ class RerunVizNode(BaseNode):
         self.subscribe(self.arm_pos_topic, self._on_arm_position)
         # Arm target commands (Vector3 preferred; Vector2 fallback)
         self.subscribe(self.arm_cmd_topic, self._on_arm_target)
+        # Power distribution telemetry
+        self.subscribe(self.power_topic, self._on_power_status)
 
         # State for visualization
         self._last_pose = np.array([0.0, 0.0, 0.0])  # x, y, yaw
@@ -105,6 +109,7 @@ class RerunVizNode(BaseNode):
         self._target_pose = None  # np.array([x,y,yaw])
         self._arm_pos: Optional[tuple[float, float]] = None  # (shoulder_rev, elbow_rev)
         self._arm_target: Optional[tuple[float, float]] = None  # (shoulder_target, elbow_target)
+        self._power_status: Optional[dict[str, float]] = None
 
         # Robot geometry (in meters): 12in x 12in x 8in
         self.robot_size = (0.3048, 0.3048, 0.2032)
@@ -201,6 +206,30 @@ class RerunVizNode(BaseNode):
         except Exception as e:
             logger.error(f"Failed to parse arm target: {e}")
 
+    def _on_power_status(self, sample):
+        """Handle power distribution telemetry as a mapping of scalar values."""
+        try:
+            if not isinstance(sample, Mapping):
+                return
+            parsed: dict[str, float] = {}
+            for key, value in sample.items():
+                if isinstance(value, (int, float)):
+                    parsed[key] = float(value)
+                    continue
+                try:
+                    parsed[key] = float(value)
+                except Exception:
+                    # Preserve timestamp or textual fields only if explicitly expected
+                    if key == "timestamp_s":
+                        try:
+                            parsed[key] = float(value)
+                        except Exception:
+                            continue
+            if parsed:
+                self._power_status = parsed
+        except Exception as e:
+            logger.error(f"Failed to parse power status: {e}")
+
     # ---- Main loop ----
     def step(self):
         # Use odometry pose exclusively for transform & alignment
@@ -245,6 +274,24 @@ class RerunVizNode(BaseNode):
             base = f"plots/{self.robot_id}/arm"
             rr.log(base + "/shoulder_target", rr.Scalars(float(t_shoulder)))
             rr.log(base + "/elbow_target", rr.Scalars(float(t_elbow)))
+
+        # Plot power system telemetry as scalar time series
+        if self._power_status:
+            base = f"plots/{self.robot_id}/power"
+            metrics = (
+                ("input_voltage_V", "input_voltage_V"),
+                ("output_voltage_V", "output_voltage_V"),
+                ("input_current_A", "input_current_A"),
+                ("output_current_A", "output_current_A"),
+                ("input_power_W", "input_power_W"),
+                ("output_power_W", "output_power_W"),
+                ("energy_uW_hr", "energy_uW_hr"),
+                ("temperature_C", "temperature_C"),
+            )
+            for key, name in metrics:
+                value = self._power_status.get(key)
+                if isinstance(value, (int, float)):
+                    rr.log(f"{base}/{name}", rr.Scalars(float(value)))
 
     def cleanup(self):
         logger.info("RerunVizNode shutting down")
