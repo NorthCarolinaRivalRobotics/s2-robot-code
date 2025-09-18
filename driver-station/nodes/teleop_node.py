@@ -85,6 +85,7 @@ class TeleopNode(BaseNode):
         # Wrist/claw command topics (native Tide nodes use full path)
         self.wrist_angle_topic = robot_topic(self.robot_id, "cmd/wrist/angle")
         self.claw_cmd_topic = robot_topic(self.robot_id, "cmd/wrist/claw")
+        self.intake_speed_topic = robot_topic(self.robot_id, "cmd/wrist/intake_speed")
         # Go-To control events
         self.goto_start_topic = robot_topic(self.robot_id, "ui/goto/start")
         self.goto_cancel_topic = robot_topic(self.robot_id, "ui/goto/cancel")
@@ -114,6 +115,8 @@ class TeleopNode(BaseNode):
         self._last_time = None
         # Teleop publish gating: only publish when inputs are active
         self._teleop_active = False
+        self._last_intake_power: float | None = None
+        self.intake_power_deadband = float((config or {}).get("intake_power_deadband", 0.05))
         
         # Arm control state (driver station side - manual increments)
         self.arm_target = np.array([0.0, 0.0], dtype=float)  # [shoulder, elbow] in joint revs
@@ -150,7 +153,7 @@ class TeleopNode(BaseNode):
             'PLACE_SIDE_WRIST_TRAVEL': np.array([UP + np.deg2rad(15.0), np.deg2rad(230.0)], dtype=float),
             'RELEASE':     np.array([UP + np.deg2rad(15.0), np.deg2rad(200.0)], dtype=float),
             'GROUND_IN_PARALLEL':     np.array([UP - np.deg2rad(55.0), np.deg2rad(280.0)], dtype=float),
-            'GROUND_IN_PERPENDICULAR':   np.array([UP - np.deg2rad(32.0), np.deg2rad(260.0)], dtype=float),
+            'SILO_IN':   np.array([UP - np.deg2rad(35.0), np.deg2rad(250.0)], dtype=float),
         }
 
         self._wrist_angle_map = {
@@ -162,7 +165,7 @@ class TeleopNode(BaseNode):
             'PLACE_SIDE_WRIST_TRAVEL': np.pi,
             'RELEASE': np.pi,
             'GROUND_IN_PARALLEL': np.deg2rad(90 + 55.0),
-            'GROUND_IN_PERPENDICULAR': np.deg2rad(90 - 10.0),
+            'SILO_IN': np.deg2rad(90 + 75.0),
         }
 
         # Claw state (decoupled from arm state machine)
@@ -571,7 +574,7 @@ class TeleopNode(BaseNode):
             elif pressed('square'):
                 self._arm_state = 'PLACE_SIDE_WRIST_TRAVEL'; transitioned = True; self._wrist_travel_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
             elif pressed('circle'):
-                self._arm_state = 'GROUND_IN_PERPENDICULAR'; transitioned = True
+                self._arm_state = 'SILO_IN'; transitioned = True
             elif pressed('cross'):
                 self._arm_state = 'GROUND_IN_PARALLEL'; transitioned = True
         elif s == 'PLACE_HEAD_WRIST_TRAVEL' or s == 'PLACE_SIDE_WRIST_TRAVEL':
@@ -597,13 +600,13 @@ class TeleopNode(BaseNode):
                 self._arm_state = 'STOW'; transitioned = True; self._clear_intermediate_monitor()
         elif s == 'GROUND_IN_PARALLEL':
             if pressed('circle'):
-                self._arm_state = 'GROUND_IN_PERPENDICULAR'; transitioned = True
+                self._arm_state = 'SILO_IN'; transitioned = True
             elif pressed('cross'):
                 self._arm_state = 'STOW'; transitioned = True
             elif pressed('triangle'):
                 self._arm_state = 'PLACE_HEAD_WRIST_TRAVEL'; transitioned = True; self._wrist_travel_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
 
-        elif s == 'GROUND_IN_PERPENDICULAR':
+        elif s == 'SILO_IN':
             if pressed('circle'):
                 self._arm_state = 'GROUND_IN_PARALLEL'; transitioned = True
             elif pressed('cross'):
@@ -632,24 +635,40 @@ class TeleopNode(BaseNode):
         r2 = float(btn.get('r2', 0.0))
         l2_now = l2 > 0.5
         r2_now = r2 > 0.5
-        if l2_now and not self._l2_active:
-            # SILO position (placeholder zeros)
-            try:
-                pose = Pose2D(timestamp=time.time(), x=0.0, y=0.0, theta=0.0)
-                self.put(self.target_topic, to_zenoh_value(pose))
-                self.put(self.goto_start_topic, to_zenoh_value(True))
-            except Exception:
-                pass
-        if r2_now and not self._r2_active:
-            # GOAL position (placeholder zeros)
-            try:
-                pose = Pose2D(timestamp=time.time(), x=0.0, y=0.0, theta=0.0)
-                self.put(self.target_topic, to_zenoh_value(pose))
-                self.put(self.goto_start_topic, to_zenoh_value(True))
-            except Exception:
-                pass
+        self._publish_intake_power(r2 - l2)
+        # if l2_now and not self._l2_active:
+        #     # SILO position (placeholder zeros)
+        #     try:
+        #         pose = Pose2D(timestamp=time.time(), x=0.0, y=0.0, theta=0.0)
+        #         self.put(self.target_topic, to_zenoh_value(pose))
+        #         self.put(self.goto_start_topic, to_zenoh_value(True))
+        #     except Exception:
+        #         pass
+        # if r2_now and not self._r2_active:
+        #     # GOAL position (placeholder zeros)
+        #     try:
+        #         pose = Pose2D(timestamp=time.time(), x=0.0, y=0.0, theta=0.0)
+        #         self.put(self.target_topic, to_zenoh_value(pose))
+        #         self.put(self.goto_start_topic, to_zenoh_value(True))
+        #     except Exception:
+        #         pass
         self._l2_active = l2_now
         self._r2_active = r2_now
+
+    def _publish_intake_power(self, power: float) -> None:
+        try:
+            clamped = max(-1.0, min(1.0, float(power)))
+        except Exception:
+            clamped = 0.0
+        if abs(clamped) < self.intake_power_deadband:
+            clamped = 0.0
+        if self._last_intake_power is not None and abs(clamped - self._last_intake_power) < 1e-3:
+            return
+        try:
+            self.put(self.intake_speed_topic, to_zenoh_value(float(clamped)))
+            self._last_intake_power = clamped
+        except Exception as e:
+            self.logger.debug(f"Failed to publish intake power: {e}")
 
     
     def _create_twist_message(self, linear_x, linear_y, angular_z):

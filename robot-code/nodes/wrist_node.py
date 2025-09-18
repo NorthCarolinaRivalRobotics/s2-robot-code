@@ -3,8 +3,9 @@
 Wrist/Claw Node (PCA9685 servos)
 
 Controls two hobby position servos (wrist angle + claw open/close)
-via an Adafruit PCA9685 16-channel PWM driver. Uses angle-to-pulse
-mapping for the wrist and two discrete positions for the claw.
+and a pair of intake ESCs via an Adafruit PCA9685 16-channel PWM driver.
+Uses angle-to-pulse mapping for the wrist, discrete positions for the claw,
+and symmetric -1..1 power mapping for the intakes.
 """
 
 import time
@@ -38,6 +39,7 @@ class WristState:
     claw_mode: str = CLAW_MODE_CLOSED
     busy: bool = False
     eta_ts: float = 0.0
+    intake_power: float = 0.0
 
 
 class WristNode(BaseNode):
@@ -45,10 +47,12 @@ class WristNode(BaseNode):
     Topics:
       - cmd/wrist/angle: float (radians)
       - cmd/wrist/claw: bool (True=open)
+      - cmd/wrist/intake_speed: float (-1..1 power)
 
       - state/wrist/angle: float
       - state/wrist/claw: bool
       - state/wrist/arrived: bool
+      - state/wrist/intake_power: float (-1..1 echo)
     """
 
     def __init__(self, *, config=None):
@@ -68,10 +72,18 @@ class WristNode(BaseNode):
         # Channels
         self.wrist_channel = int(cfg.get("wrist_channel", 0))
         self.claw_channel = int(cfg.get("claw_channel", 1))
+        self.intake_esc_left = int(cfg.get("intake_esc_left", 2))
+        self.intake_esc_right = int(cfg.get("intake_esc_right", 3))
 
         # Servo pulse bounds (PCA9685 tick counts, 0..4095). Typical ~150..600 at 60Hz.
         self.servo_min = int(cfg.get("servo_min", 150))
         self.servo_max = int(cfg.get("servo_max", 600))
+
+        # ESC pulse mapping (three-point to support bidirectional brushed controllers)
+        self.esc_min = int(cfg.get("intake_esc_min", self.servo_min))
+        self.esc_max = int(cfg.get("intake_esc_max", self.servo_max))
+        default_neutral = int(round((self.esc_min + self.esc_max) * 0.5))
+        self.esc_neutral = int(cfg.get("intake_esc_neutral", default_neutral))
 
         # Wrist mechanical range in radians mapped linearly to [servo_min, servo_max]
         self.wrist_min_rad = float(cfg.get("wrist_min_rad", 0.0))
@@ -86,17 +98,21 @@ class WristNode(BaseNode):
         # Topics
         self.cmd_angle_topic = robot_topic(self.robot_id, "cmd/wrist/angle")
         self.cmd_claw_topic = robot_topic(self.robot_id, "cmd/wrist/claw")
+        self.cmd_intake_speed_topic = robot_topic(self.robot_id, "cmd/wrist/intake_speed")
         self.state_angle_topic = robot_topic(self.robot_id, "state/wrist/angle")
         self.state_claw_topic = robot_topic(self.robot_id, "state/wrist/claw")
         self.state_arrived_topic = robot_topic(self.robot_id, "state/wrist/arrived")
+        self.state_intake_power_topic = robot_topic(self.robot_id, "state/wrist/intake_power")
 
         # Subscribe to commands
         self.subscribe(self.cmd_angle_topic, self._on_cmd_angle)
         self.subscribe(self.cmd_claw_topic, self._on_cmd_claw)
+        self.subscribe(self.cmd_intake_speed_topic, self._on_cmd_intake_speed)
 
         # Runtime state
         self._state = WristState()
         self._target_angle = 0.0
+        self._last_intake_cmd: float | None = None
 
         # Hardware init
         self.pwm = None
@@ -117,8 +133,8 @@ class WristNode(BaseNode):
             logger.warning("Adafruit_PCA9685 not available; running without hardware control")
 
         logger.info(
-            f"WristNode ready: cmd=({self.cmd_angle_topic}, {self.cmd_claw_topic})"
-            f" state=({self.state_angle_topic}, {self.state_claw_topic}, {self.state_arrived_topic})"
+            f"WristNode ready: cmd=({self.cmd_angle_topic}, {self.cmd_claw_topic}, {self.cmd_intake_speed_topic})"
+            f" state=({self.state_angle_topic}, {self.state_claw_topic}, {self.state_arrived_topic}, {self.state_intake_power_topic})"
         )
 
     # --- Helpers ---
@@ -144,6 +160,22 @@ class WristNode(BaseNode):
             self.pwm.set_pwm(int(channel), 0, int(pulse))  # API per adafruit_Pca_example.py
         except Exception as e:
             logger.warning(f"Failed to set PWM on ch{channel}: {e}")
+
+    def _power_to_pulse(self, power: float) -> int:
+        clamped = max(-1.0, min(1.0, float(power)))
+        hi_span = max(self.esc_max - self.esc_neutral, 1)
+        lo_span = max(self.esc_neutral - self.esc_min, 1)
+        if clamped >= 0.0:
+            pulse = self.esc_neutral + int(round(clamped * hi_span))
+        else:
+            pulse = self.esc_neutral + int(round(clamped * lo_span))
+        return int(self._clamp(pulse, self.esc_min, self.esc_max))
+
+    def _apply_intake_power(self, power: float) -> None:
+        pulse = self._power_to_pulse(power)
+        self._set_servo(self.intake_esc_left, pulse)
+        self._set_servo(self.intake_esc_right, pulse)
+        logger.debug(f"Intake power {power:.2f} -> pulse {pulse}")
 
     def _resolve_claw_mode(self, sample) -> str | None:
         try:
@@ -220,6 +252,19 @@ class WristNode(BaseNode):
         except Exception:
             pass
 
+    def _on_cmd_intake_speed(self, sample) -> None:
+        try:
+            power = float(sample)
+        except Exception:
+            logger.debug(f"Invalid intake speed sample: {sample}")
+            return
+        clamped = max(-1.0, min(1.0, power))
+        if self._last_intake_cmd is not None and abs(clamped - self._last_intake_cmd) < 1e-3:
+            return
+        self._last_intake_cmd = clamped
+        self._state.intake_power = clamped
+        self._apply_intake_power(clamped)
+
     # --- Node loop ---
     def step(self):
         now = time.time()
@@ -229,6 +274,7 @@ class WristNode(BaseNode):
         try:
             self.put(self.state_angle_topic, to_zenoh_value(float(self._state.angle)))
             self.put(self.state_arrived_topic, to_zenoh_value(not self._state.busy))
+            self.put(self.state_intake_power_topic, to_zenoh_value(float(self._state.intake_power)))
         except Exception:
             pass
 
