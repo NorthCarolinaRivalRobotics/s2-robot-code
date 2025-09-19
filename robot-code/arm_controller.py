@@ -43,6 +43,8 @@ class ArmController:
         self.max_torque_nm = max_torque_nm
         self.max_velocity_rps = max_velocity_rps
         self.max_acceleration_rps2 = max_acceleration_rps2
+        self.virtual_4_bar_ratio = 38.0 / 40.0  # ratio < 1.0 means elbow under-rotates as shoulder moves
+        self._shoulder_reference_angle = math.pi / 2.0
         # Controllers
         self.servos = {
             shoulder_id: moteus.Controller(id=shoulder_id, transport=self.transport),
@@ -84,6 +86,18 @@ class ArmController:
         joint_revs = (motor_revs - self._motor_zero[motor_id]) / self.gear_ratio
         return joint_revs * (2.0 * math.pi)
 
+    def _elbow_compensation(self, shoulder_angle_rad: float) -> float:
+        mismatch = 1.0 - self.virtual_4_bar_ratio
+        if abs(mismatch) < 1e-9:
+            return 0.0
+        return mismatch * (shoulder_angle_rad - self._shoulder_reference_angle)
+
+    def _elbow_user_to_motor(self, elbow_angle_rad: float, shoulder_angle_rad: float) -> float:
+        return elbow_angle_rad + self._elbow_compensation(shoulder_angle_rad)
+
+    def _elbow_motor_to_user(self, elbow_angle_rad: float, shoulder_angle_rad: float) -> float:
+        return elbow_angle_rad - self._elbow_compensation(shoulder_angle_rad)
+
     async def set_targets(
         self,
         shoulder_angle_rad: float,
@@ -98,6 +112,8 @@ class ArmController:
         """
         self._target_angle[self.shoulder_id] = shoulder_angle_rad
         self._target_angle[self.elbow_id] = elbow_angle_rad
+
+        elbow_motor_angle_rad = self._elbow_user_to_motor(elbow_angle_rad, shoulder_angle_rad)
 
         # Determine desired endpoint velocity for the trajectory in motor rev/s.
         # If unspecified, default to 0.0 for a stop at the target.
@@ -121,7 +137,7 @@ class ArmController:
         )
         cmds.append(
             self.servos[self.elbow_id].make_position(
-                position=self._angle_to_motor(elbow_angle_rad, self.elbow_id),
+                position=self._angle_to_motor(elbow_motor_angle_rad, self.elbow_id),
                 velocity=endpoint_vel_rps,
                 maximum_torque=self.max_torque_nm,
                 velocity_limit=np.nan,
@@ -135,13 +151,16 @@ class ArmController:
         # Parse joint positions from results
         joint_s = self._target_angle[self.shoulder_id]
         joint_e = self._target_angle[self.elbow_id]
+        elbow_motor_angle = None
         for r in results:
             if r.id == self.shoulder_id and hasattr(r, 'values') and r.values is not None:
                 if moteus.Register.POSITION in r.values:
                     joint_s = self._motor_to_angle(float(r.values[moteus.Register.POSITION]), self.shoulder_id)
             elif r.id == self.elbow_id and hasattr(r, 'values') and r.values is not None:
                 if moteus.Register.POSITION in r.values:
-                    joint_e = self._motor_to_angle(float(r.values[moteus.Register.POSITION]), self.elbow_id)
+                    elbow_motor_angle = self._motor_to_angle(float(r.values[moteus.Register.POSITION]), self.elbow_id)
+        if elbow_motor_angle is not None:
+            joint_e = self._elbow_motor_to_user(elbow_motor_angle, joint_s)
         return (joint_s, joint_e)
 
     async def increment(self, d_shoulder: float, d_elbow: float) -> Tuple[float, float]:
