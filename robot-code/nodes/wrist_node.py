@@ -80,9 +80,9 @@ class WristNode(BaseNode):
         self.servo_max = int(cfg.get("servo_max", 600))
 
         # ESC pulse mapping (three-point to support bidirectional brushed controllers)
-        self.esc_min = int(cfg.get("intake_esc_min", 246))
+        self.esc_min = int(cfg.get("intake_esc_min", 123))
         self.esc_max = int(cfg.get("intake_esc_max", 492))
-        default_neutral = int(round((246 + 492) * 0.5))
+        default_neutral = int(round((123 + 492) * 0.5))
         self.esc_neutral = int(cfg.get("intake_esc_neutral", default_neutral))
 
         # Wrist mechanical range in radians mapped linearly to [servo_min, servo_max]
