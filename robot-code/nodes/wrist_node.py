@@ -139,9 +139,9 @@ class WristNode(BaseNode):
 
         # arming sequence for the intakes
         self._apply_intake_power(0.0)
-        time.sleep(0.1)
+        time.sleep(1.0)
         self._apply_intake_power(1.0)
-        time.sleep(0.1)
+        time.sleep(1.0)
         self._apply_intake_power(0.0)
 
     # --- Helpers ---
