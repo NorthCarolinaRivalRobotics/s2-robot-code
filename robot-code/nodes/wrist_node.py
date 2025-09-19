@@ -137,6 +137,13 @@ class WristNode(BaseNode):
             f" state=({self.state_angle_topic}, {self.state_claw_topic}, {self.state_arrived_topic}, {self.state_intake_power_topic})"
         )
 
+        # arming sequence for the intakes
+        self._apply_intake_power(0.0)
+        time.sleep(0.1)
+        self._apply_intake_power(1.0)
+        time.sleep(0.1)
+        self._apply_intake_power(0.0)
+
     # --- Helpers ---
     def _clamp(self, v: float, lo: float, hi: float) -> float:
         return max(lo, min(hi, v))
