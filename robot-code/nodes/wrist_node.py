@@ -143,6 +143,7 @@ class WristNode(BaseNode):
         self._apply_intake_power(1.0)
         time.sleep(1.0)
         self._apply_intake_power(0.0)
+        time.sleep(1.0)
 
     # --- Helpers ---
     def _clamp(self, v: float, lo: float, hi: float) -> float:
