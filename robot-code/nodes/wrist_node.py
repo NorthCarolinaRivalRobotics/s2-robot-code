@@ -80,8 +80,8 @@ class WristNode(BaseNode):
         self.servo_max = int(cfg.get("servo_max", 600))
 
         # ESC pulse mapping (three-point to support bidirectional brushed controllers)
-        self.esc_min = int(cfg.get("intake_esc_min", 1000))
-        self.esc_max = int(cfg.get("intake_esc_max", 2000))
+        self.esc_min = int(cfg.get("intake_esc_min", 0))
+        self.esc_max = int(cfg.get("intake_esc_max", 800))
         default_neutral = int(round((self.esc_min + self.esc_max) * 0.5))
         self.esc_neutral = int(cfg.get("intake_esc_neutral", default_neutral))
 
@@ -229,7 +229,7 @@ class WristNode(BaseNode):
         self._target_angle = float(self._clamp(target, self.wrist_min_rad, self.wrist_max_rad))
         self._state.busy = True
         self._state.eta_ts = now + travel
-        logger.info(f"Wrist angle cmd: {target:.3f} rad (pulse={pulse}), eta {travel:.2f}s")
+        # logger.info(f"Wrist angle cmd: {target:.3f} rad (pulse={pulse}), eta {travel:.2f}s")
 
     def _on_cmd_claw(self, sample):
         mode = self._resolve_claw_mode(sample)
@@ -251,7 +251,7 @@ class WristNode(BaseNode):
 
         pulse = self._norm_to_pulse(norm)
         self._set_servo(self.claw_channel, pulse)
-        logger.info(f"Claw {log_label} (pulse={pulse})")
+        # logger.info(f"Claw {log_label} (pulse={pulse})")
 
         # Publish immediately (legacy bool state)
         try:
