@@ -261,6 +261,7 @@ class WristNode(BaseNode):
 
     def _on_cmd_intake_speed(self, sample) -> None:
         try:
+            logger.info(f"Intake speed sample: {sample}")
             power = float(sample)
         except Exception:
             logger.debug(f"Invalid intake speed sample: {sample}")
