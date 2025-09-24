@@ -76,8 +76,8 @@ class TunerConfig:
     wrist_max_rad: float = 1.0
     wrist_channel: int = 0
     claw_channel: int = 1
-    claw_open_norm: float = 0.1
-    claw_closed_norm: float = 0.55
+    claw_open_norm: float = 0.600
+    claw_closed_norm: float = 0.250
 
 
 class PCA9685Driver:
