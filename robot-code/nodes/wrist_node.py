@@ -90,8 +90,8 @@ class WristNode(BaseNode):
         self.wrist_max_rad = float(cfg.get("wrist_max_rad", np.pi))
 
         # Claw open/close positions as normalized [0..1] in the servo travel
-        self.claw_open_norm = float(cfg.get("claw_open_norm", 0.600))
-        self.claw_closed_norm = float(cfg.get("claw_closed_norm", 0.250))
+        self.claw_open_norm = float(cfg.get("claw_open_norm", 0.75))
+        self.claw_closed_norm = float(cfg.get("claw_closed_norm", 0.45))
         default_spear_norm = (self.claw_open_norm + self.claw_closed_norm) * 0.5
         self.claw_spear_norm = float(cfg.get("claw_spear_norm", default_spear_norm))
 
