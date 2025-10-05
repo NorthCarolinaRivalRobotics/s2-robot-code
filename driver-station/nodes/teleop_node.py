@@ -49,6 +49,7 @@ class TeleopNode(BaseNode):
         self.max_angular_speed = 1.0  # rad/s
         self.deadzone = 0.05
         self.field_relative = True  # Convert joystick to field-relative driving
+        self.CLAW_OFFSET_ANGLE = np.deg2rad(-22.0)
 
         # Target pose UI (for Go-To node)
         self.target_pose = np.array([0.0, 0.0, 0.0])  # x, y, theta
@@ -86,6 +87,7 @@ class TeleopNode(BaseNode):
         self.wrist_angle_topic = robot_topic(self.robot_id, "cmd/wrist/angle")
         self.claw_cmd_topic = robot_topic(self.robot_id, "cmd/wrist/claw")
         self.intake_speed_topic = robot_topic(self.robot_id, "cmd/wrist/intake_speed")
+        self.heading_zero_topic = robot_topic(self.robot_id, "cmd/odometry/rezero_yaw")
         # Go-To control events
         self.goto_start_topic = robot_topic(self.robot_id, "ui/goto/start")
         self.goto_cancel_topic = robot_topic(self.robot_id, "ui/goto/cancel")
@@ -136,6 +138,9 @@ class TeleopNode(BaseNode):
         # Intermediate travel fallback timer (position-based transition preferred)
         # Increase to 3.0s so that a fallback is obvious if it triggers.
         self._wrist_travel_timer = ElapsedTimer(0.35)
+        self._pull_out_timer = ElapsedTimer(1.0)
+        self._legal_start_intermediate_state_timer = ElapsedTimer(0.25)
+        self._legal_start_intermediate_state_timer_2 = ElapsedTimer(0.25)
         # Intermediate crossing detection state
         self._intermediate_target: np.ndarray | None = None
         self._intermediate_prev_err: tuple[float, float] | None = None
@@ -143,29 +148,44 @@ class TeleopNode(BaseNode):
         # arm straight out is (0.0, pi)
         UP = np.pi/2.0
 
+        PULL_OUT_ANGLE_OFFSET = 25.0
+        SILO_IN = np.array([UP - np.deg2rad(18.0), np.deg2rad(263.0)], dtype=float)
+        SILO_PULL_OUT = np.array([UP - np.deg2rad(25.0), np.deg2rad(275.0)], dtype=float)
+        STOW = np.array([UP - np.deg2rad(10.0) - np.deg2rad(25), np.deg2rad(263.0) + np.deg2rad(20)], dtype=float)
+
+        self.angle_pid = AnglePID(kp=1.5, ki=0.00, kd=0.00)
 
         self._pose_map = {
+            "LEGAL_START": np.array([np.deg2rad(-105), UP + np.deg2rad(45.0)], dtype=float),
+            "UNFLIP": np.array([UP + np.deg2rad(75.0), np.deg2rad(160.0)], dtype=float),
+            "EXIT_LEGAL_START_INTERMEDIATE_STATE": np.array([UP + np.deg2rad(6.0), UP + np.deg2rad(0.0)], dtype=float),
+            "EXIT_LEGAL_START_INTERMEDIATE_STATE_2": np.array([UP + np.deg2rad(12.0), np.deg2rad(250.0)], dtype=float),
             "UP": np.array([UP, UP], dtype=float),
-            'STOW':        np.array([UP - np.deg2rad(35.0), np.deg2rad(270.0)], dtype=float),
-            'PLACE_HEAD':  np.array([UP + np.deg2rad(12.0), UP + np.deg2rad(47.0)], dtype=float),
+            'STOW':        STOW,
+            'PLACE_HEAD':  np.array([UP + np.deg2rad(0.0), UP + np.deg2rad(30.0)], dtype=float),
             'PLACE_HEAD_WRIST_TRAVEL': np.array([UP + np.deg2rad(0.0), np.deg2rad(200.0)], dtype=float),
             'PLACE_SIDE':  np.array([UP + np.deg2rad(-10.0), UP + np.deg2rad(10.0)], dtype=float),
-            'PLACE_SIDE_WRIST_TRAVEL': np.array([UP + np.deg2rad(15.0), np.deg2rad(230.0)], dtype=float),
-            'RELEASE':     np.array([UP + np.deg2rad(15.0), np.deg2rad(200.0)], dtype=float),
-            'GROUND_IN_PARALLEL':     np.array([UP - np.deg2rad(55.0), np.deg2rad(280.0)], dtype=float),
-            'SILO_IN':   np.array([UP - np.deg2rad(35.0), np.deg2rad(250.0)], dtype=float),
+            'PLACE_SIDE_WRIST_TRAVEL': np.array([UP, np.deg2rad(230.0)], dtype=float),
+            'RELEASE':     np.array([UP + np.deg2rad(15.0), np.deg2rad(190.0)], dtype=float),
+            'GROUND_IN_PARALLEL':     np.array([UP - np.deg2rad(55.0), np.deg2rad(284.0)], dtype=float),
+            'SILO_IN':   SILO_IN,
+            'SILO_PULL_OUT': SILO_PULL_OUT,
         }
 
         self._wrist_angle_map = {
+            'LEGAL_START': np.deg2rad(90 + 100.0),
+            'EXIT_LEGAL_START_INTERMEDIATE_STATE': np.deg2rad(90 + 100.0),
+            'EXIT_LEGAL_START_INTERMEDIATE_STATE_2': np.deg2rad(90 + 100.0),
             'UP': np.pi/2.0,
-            'STOW': np.pi,
-            'PLACE_HEAD': np.pi/2.0,
+            'STOW': np.deg2rad(90 + 35.0),
+            'PLACE_HEAD': np.pi/2.0 + np.deg2rad(-30.0),
             'PLACE_HEAD_WRIST_TRAVEL': np.pi,
-            'PLACE_SIDE': np.pi/2.0,
+            'PLACE_SIDE': np.deg2rad(90 - 65.0),
             'PLACE_SIDE_WRIST_TRAVEL': np.pi,
             'RELEASE': np.pi,
-            'GROUND_IN_PARALLEL': np.deg2rad(90 + 55.0),
-            'SILO_IN': np.deg2rad(90 + 75.0),
+            'GROUND_IN_PARALLEL': np.deg2rad(90 + 50.0),
+            'SILO_IN': np.deg2rad(90 + 65.0),
+            'SILO_PULL_OUT': np.deg2rad(90 + 45.0),
         }
 
         # Claw state (decoupled from arm state machine)
@@ -191,7 +211,7 @@ class TeleopNode(BaseNode):
         self.logger.info("  D-Pad Up/Down: Elbow +/− small step")
         self.logger.info("  Triangle: Place (head-on)")
         self.logger.info("  Square: Place (side)")
-        self.logger.info("  Left bumper: Spear claw (toggle spear/closed)")
+        self.logger.info("  Left bumper: Zero robot heading")
         self.logger.info("  Right bumper: Toggle claw open/close")
         self.logger.info("  Circle: Toggle intakes")
         self.logger.info("  Cross: Advance (open->silo) or Stow from intakes")
@@ -455,7 +475,7 @@ class TeleopNode(BaseNode):
             self.logger.info(f"Failed to publish arm target: {e}")
         # Wrist angle
         try:
-            self.put(self.wrist_angle_topic, to_zenoh_value(float(wrist_angle)))
+            self.put(self.wrist_angle_topic, to_zenoh_value(float(wrist_angle + self.CLAW_OFFSET_ANGLE)))
         except Exception as e:
             self.logger.info(f"Failed to publish wrist angle: {e}")
         # Claw command (driven elsewhere via toggle)
@@ -471,6 +491,14 @@ class TeleopNode(BaseNode):
                 self.logger.info(f"Claw set to {state}")
         except Exception as e:
             self.logger.info(f"Failed to publish claw state '{state}': {e}")
+
+    def _zero_robot_heading(self) -> None:
+        """Publish a command to rezero the robot heading."""
+        try:
+            self.put(self.heading_zero_topic, to_zenoh_value(True))
+            self.logger.info("Heading rezero command sent")
+        except Exception as e:
+            self.logger.info(f"Failed to publish heading rezero command: {e}")
 
     def _set_claw_state(self, state: str, *, log: bool = True) -> None:
         if state not in _CLAW_STATES:
@@ -587,7 +615,10 @@ class TeleopNode(BaseNode):
                 self._arm_state = 'PLACE_HEAD' if s == 'PLACE_HEAD_WRIST_TRAVEL' else 'PLACE_SIDE'; transitioned = True; self._clear_intermediate_monitor()
         elif s in ('PLACE_HEAD', 'PLACE_SIDE'):
             if pressed('circle'):
-                self._arm_state = 'RELEASE'; transitioned = True; self._wrist_travel_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
+                if self._arm_state == 'PLACE_HEAD':
+                    self._arm_state = 'RELEASE'; transitioned = True; self._wrist_travel_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
+                else:
+                    self._arm_state = 'PLACE_HEAD'; transitioned = True; self._wrist_travel_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
         elif s == 'RELEASE':
             # Prefer crossing-based transition; use timer as fallback; allow manual advance on Cross
             if self._arm_crossed_intermediate():
@@ -608,20 +639,40 @@ class TeleopNode(BaseNode):
 
         elif s == 'SILO_IN':
             if pressed('circle'):
-                self._arm_state = 'GROUND_IN_PARALLEL'; transitioned = True
+                self._arm_state = 'SILO_PULL_OUT'; transitioned = True
             elif pressed('cross'):
-                self._arm_state = 'STOW'; transitioned = True
+                self._arm_state = 'STOW'; transitioned = True; self._wrist_travel_timer.reset()
             elif pressed('triangle'):
-                self._arm_state = 'PLACE_SIDE_WRIST_TRAVEL'; transitioned = True; self._wrist_travel_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
+                self._arm_state = 'PLACE_SIDE_WRIST_TRAVEL'; transitioned = True; self._pull_out_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
         elif s == 'UP':
             if pressed('direction_down'):
+                self._arm_state = 'LEGAL_START'; transitioned = True
+        elif s == 'EXIT_LEGAL_START_INTERMEDIATE_STATE':
+            if self._legal_start_intermediate_state_timer.elapsed():
+                self._arm_state = 'EXIT_LEGAL_START_INTERMEDIATE_STATE_2'; transitioned = True; self._legal_start_intermediate_state_timer_2.reset(); self._begin_intermediate_monitor(self._arm_state)
+        elif s == 'EXIT_LEGAL_START_INTERMEDIATE_STATE_2':
+            if self._legal_start_intermediate_state_timer_2.elapsed():
+                self._arm_state = 'STOW'; transitioned = True; self._clear_intermediate_monitor()
+        elif s == 'LEGAL_START':
+            if pressed('circle'):
+                self._arm_state = 'EXIT_LEGAL_START_INTERMEDIATE_STATE'; transitioned = True; self._legal_start_intermediate_state_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
+        elif s == 'SILO_PULL_OUT':
+            if self._pull_out_timer.elapsed():
+                self._arm_state = 'STOW'; transitioned = True; self._clear_intermediate_monitor()
+        elif s == 'UNFLIP':
+            if pressed('circle'):
                 self._arm_state = 'STOW'; transitioned = True
 
         if pressed('direction_up'):
             self._arm_state = 'UP'; transitioned = True
 
+        if pressed('direction_right'):
+            self._arm_state = 'UNFLIP'; transitioned = True
+
         if transitioned:
             self._last_transition_ts = now
+            if self._arm_state == 'STOW':
+                self._set_claw_state(CLAW_CLOSED)
         self._apply_arm_state()
 
         # Save for edge detection next time
@@ -631,8 +682,10 @@ class TeleopNode(BaseNode):
 
     def _handle_triggers(self, btn: dict):
         # Thresholding with edge detection
-        l2 = float(btn.get('l2', 0.0))
-        r2 = float(btn.get('r2', 0.0))
+        l2 = float(btn.get('l2', 0.0)) * 0.35
+        r2 = float(btn.get('r2', 0.0)) * 0.35
+        if self._arm_state == 'GROUND_IN_PARALLEL':
+            r2 = 0.11
         l2_now = l2 > 0.5
         r2_now = r2 > 0.5
         self._publish_intake_power(r2 - l2)
@@ -689,11 +742,16 @@ class TeleopNode(BaseNode):
             now = time.time()
             # Read controller inputs
             inputs = self._read_controller_inputs()
+            buttons = self._read_buttons()
             
             # Get twist commands from controller (joystick frame)
             linear_x = inputs['linear_x']
             linear_y = -inputs['linear_y']
             angular_z = -inputs['angular_z']
+            self.logger.info("buttons: ", buttons)
+            if buttons['l2'] > 0.5:
+                angular_z = self.angle_pid.update(-self.current_theta, np.deg2rad(0.0))
+
             # Compute dt
             if self._last_time is None:
                 dt = 1.0 / max(self.update_rate, 1e-6)
@@ -715,8 +773,7 @@ class TeleopNode(BaseNode):
                         target = CLAW_OPEN
                     self._set_claw_state(target)
                 if lb_now and not self._lb_prev:
-                    target = CLAW_SPEAR if self._claw_state != CLAW_SPEAR else CLAW_CLOSED
-                    self._set_claw_state(target)
+                    self._zero_robot_heading()
                 self._rb_prev = rb_now
                 self._lb_prev = lb_now
             except Exception as e:
@@ -761,6 +818,7 @@ class TeleopNode(BaseNode):
             else:
                 # Inputs active: apply acceleration limiting and publish
                 self._teleop_active = True
+                
                 limited = apply_acceleration_limit(Twist2dVelocity(linear_x, linear_y, angular_z), dt)
                 twist_msg = self._create_twist_message(limited.vx, limited.vy, limited.w)
                 self.put(self.twist_topic, to_zenoh_value(twist_msg))
@@ -817,3 +875,36 @@ class ElapsedTimer:
     
     def reset(self):
         self.start_ts = time.time()
+
+
+class AnglePID:
+    def __init__(self, kp: float, ki: float, kd: float, max_integral: float = 1.0):
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.integral = 0.0
+        self.last_error = 0.0
+        self.last_time = time.time()
+        
+    def update(self, current_angle: float, target_angle: float):
+        dt = time.time() - self.last_time
+        if dt > 0.2:
+            dt = 0.0
+        error = self.wrap_angle(target_angle - current_angle)
+        self.integral += error * dt
+
+        if dt > 0.0:
+            derivative = (error - self.last_error) / dt
+        else:
+            derivative = 0.0
+
+        self.last_error = error
+        self.last_time = time.time()
+        return self.kp * error + self.ki * self.integral + self.kd * derivative
+
+    def wrap_angle(self, angle: float):
+        while angle > math.pi:
+            angle -= 2 * math.pi
+        while angle < -math.pi:
+            angle += 2 * math.pi
+        return angle

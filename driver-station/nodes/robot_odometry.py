@@ -51,11 +51,13 @@ class RobotOdometryNode(BaseNode):
         self.imu_quat_topic = robot_topic(self.robot_id, "sensor/imu/quat")
         self.gyro_topic = robot_topic(self.robot_id, "sensor/gyro/vel")
         self.pose_topic = robot_topic(self.robot_id, "state/pose2d")
+        self.rezero_topic = robot_topic(self.robot_id, "cmd/odometry/rezero_yaw")
         
         # Subscribe to topics
         self.subscribe(self.state_twist_topic, self.on_state_twist)
         self.subscribe(self.imu_quat_topic, self.on_imu_quaternion)
         self.subscribe(self.gyro_topic, self.on_gyro_velocity)
+        self.subscribe(self.rezero_topic, self._on_rezero_command)
         
         # State variables
         self.current_pose = SE2.exp(np.array([0.0, 0.0, 0.0]))  # Start at origin
@@ -103,7 +105,20 @@ class RobotOdometryNode(BaseNode):
             
         except Exception as e:
             logger.error(f"Error parsing state twist: {e}")
-    
+
+    def _on_rezero_command(self, sample):
+        """Handle a request to rezero the yaw based on IMU measurements."""
+        try:
+            if isinstance(sample, dict):
+                should_rezero = bool(sample.get("value", True))
+            else:
+                should_rezero = bool(sample)
+        except Exception:
+            should_rezero = True
+        if should_rezero:
+            logger.info("Received heading rezero command")
+            self.rezero_yaw()
+
     def on_imu_quaternion(self, sample):
         """
         Handle incoming IMU quaternion data.
