@@ -24,7 +24,7 @@ CLAW_MODE_SPEAR = "SPEAR"
 _CLAW_MODES = {CLAW_MODE_CLOSED, CLAW_MODE_OPEN, CLAW_MODE_SPEAR}
 
 _INDICATOR_COLOR_US = {
-    "red": 1190.0,
+    "red": 1175.0,
     "orange": 1200.0,
     "yellow": 1300.0,
     "sage": 1400.0,
