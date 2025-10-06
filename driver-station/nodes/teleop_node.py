@@ -29,6 +29,18 @@ CLAW_OPEN = "OPEN"
 CLAW_SPEAR = "SPEAR"
 _CLAW_STATES = {CLAW_CLOSED, CLAW_OPEN, CLAW_SPEAR}
 
+_INDICATOR_COLORS = {
+    "red",
+    "orange",
+    "yellow",
+    "sage",
+    "green",
+    "azure",
+    "blue",
+    "indigo",
+    "violet",
+}
+
 
 class TeleopNode(BaseNode):
     """
@@ -87,6 +99,7 @@ class TeleopNode(BaseNode):
         self.wrist_angle_topic = robot_topic(self.robot_id, "cmd/wrist/angle")
         self.claw_cmd_topic = robot_topic(self.robot_id, "cmd/wrist/claw")
         self.intake_speed_topic = robot_topic(self.robot_id, "cmd/wrist/intake_speed")
+        self.indicator_color_topic = robot_topic(self.robot_id, "cmd/wrist/light_color")
         self.heading_zero_topic = robot_topic(self.robot_id, "cmd/odometry/rezero_yaw")
         # Go-To control events
         self.goto_start_topic = robot_topic(self.robot_id, "ui/goto/start")
@@ -108,6 +121,7 @@ class TeleopNode(BaseNode):
         
         # Initialize logging
         self.logger = logging.getLogger(f"Teleop_{self.robot_id}")
+        self._initialize_indicator_color_map()
         
         # Initialize PS5 controller
         self._init_controller()
@@ -119,6 +133,11 @@ class TeleopNode(BaseNode):
         self._teleop_active = False
         self._last_intake_power: float | None = None
         self.intake_power_deadband = float((config or {}).get("intake_power_deadband", 0.05))
+        self._indicator_color: str | None = None
+        raw_indicator_map = (config or {}).get("arm_indicator_color_map", {})
+        self._arm_indicator_color_cfg = raw_indicator_map if isinstance(raw_indicator_map, dict) else {}
+        self._arm_indicator_color_map: dict[str, str] = {}
+        self._startup_indicator_color = self._normalize_indicator_color((config or {}).get("indicator_color"))
         
         # Arm control state (driver station side - manual increments)
         self.arm_target = np.array([0.0, 0.0], dtype=float)  # [shoulder, elbow] in joint revs
@@ -492,6 +511,51 @@ class TeleopNode(BaseNode):
         except Exception as e:
             self.logger.info(f"Failed to publish claw state '{state}': {e}")
 
+    def _normalize_indicator_color(self, color) -> str | None:
+        if color is None:
+            return None
+        try:
+            text = str(color).strip().lower()
+        except Exception:
+            return None
+        if not text:
+            return None
+        if text in _INDICATOR_COLORS:
+            return text
+        return None
+
+    def _initialize_indicator_color_map(self) -> None:
+        self._arm_indicator_color_map.clear()
+        for state, raw_color in self._arm_indicator_color_cfg.items():
+            if not isinstance(state, str):
+                continue
+            color = self._normalize_indicator_color(raw_color)
+            if color is None and raw_color:
+                self.logger.debug(
+                    f"Ignoring indicator color '{raw_color}' for state '{state}'; not a known option"
+                )
+                continue
+            if color:
+                self._arm_indicator_color_map[state] = color
+
+    def _publish_indicator_color(self, color: str, *, log: bool = False, force: bool = False) -> None:
+        normalized = self._normalize_indicator_color(color)
+        if normalized is None:
+            self.logger.debug(f"Ignoring attempt to set indicator to unknown color '{color}'")
+            return
+        if not force and self._indicator_color == normalized:
+            return
+        try:
+            self.put(self.indicator_color_topic, to_zenoh_value(normalized))
+            self._indicator_color = normalized
+            if log:
+                self.logger.info(f"Indicator light set to {normalized}")
+        except Exception as e:
+            self.logger.info(f"Failed to publish indicator color '{normalized}': {e}")
+
+    def set_indicator_light_color(self, color: str, *, log: bool = False, force: bool = False) -> None:
+        self._publish_indicator_color(color, log=log, force=force)
+
     def _zero_robot_heading(self) -> None:
         """Publish a command to rezero the robot heading."""
         try:
@@ -522,6 +586,9 @@ class TeleopNode(BaseNode):
         else:
             evf = 0.0
         self._arm_publish_targets(float(pose[0]), float(pose[1]), wrist, claw_state, end_velocity_frac=evf)
+        color = self._arm_indicator_color_map.get(self._arm_state)
+        if color:
+            self._publish_indicator_color(color)
 
     def _begin_intermediate_monitor(self, state_name: str):
         """Initialize crossing detection for an intermediate waypoint state."""
@@ -740,6 +807,13 @@ class TeleopNode(BaseNode):
         try:
             self.logger.info(f"Arm State: {self._arm_state}")
             now = time.time()
+            if self._startup_indicator_color:
+                if self._indicator_color == self._startup_indicator_color:
+                    self._startup_indicator_color = None
+                else:
+                    self._publish_indicator_color(self._startup_indicator_color, force=True)
+                    if self._indicator_color == self._startup_indicator_color:
+                        self._startup_indicator_color = None
             # Read controller inputs
             inputs = self._read_controller_inputs()
             buttons = self._read_buttons()

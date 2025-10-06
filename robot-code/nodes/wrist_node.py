@@ -23,6 +23,18 @@ CLAW_MODE_OPEN = "OPEN"
 CLAW_MODE_SPEAR = "SPEAR"
 _CLAW_MODES = {CLAW_MODE_CLOSED, CLAW_MODE_OPEN, CLAW_MODE_SPEAR}
 
+_INDICATOR_COLOR_US = {
+    "red": 1100.0,
+    "orange": 1200.0,
+    "yellow": 1300.0,
+    "sage": 1400.0,
+    "green": 1500.0,
+    "azure": 1600.0,
+    "blue": 1700.0,
+    "indigo": 1800.0,
+    "violet": 1900.0,
+}
+
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +52,7 @@ class WristState:
     busy: bool = False
     eta_ts: float = 0.0
     intake_power: float = 0.0
+    indicator_color: str = ""
 
 
 class WristNode(BaseNode):
@@ -74,6 +87,7 @@ class WristNode(BaseNode):
         self.claw_channel = int(cfg.get("claw_channel", 1))
         self.intake_esc_left = int(cfg.get("intake_esc_left", 2))
         self.intake_esc_right = int(cfg.get("intake_esc_right", 3))
+        self.indicator_channel = int(cfg.get("indicator_channel", 4))
 
         # Servo pulse bounds (PCA9685 tick counts, 0..4095). Typical ~150..600 at 60Hz.
         self.servo_min = int(cfg.get("servo_min", 150))
@@ -99,6 +113,7 @@ class WristNode(BaseNode):
         self.cmd_angle_topic = robot_topic(self.robot_id, "cmd/wrist/angle")
         self.cmd_claw_topic = robot_topic(self.robot_id, "cmd/wrist/claw")
         self.cmd_intake_speed_topic = robot_topic(self.robot_id, "cmd/wrist/intake_speed")
+        self.cmd_indicator_topic = robot_topic(self.robot_id, "cmd/wrist/light_color")
         self.state_angle_topic = robot_topic(self.robot_id, "state/wrist/angle")
         self.state_claw_topic = robot_topic(self.robot_id, "state/wrist/claw")
         self.state_arrived_topic = robot_topic(self.robot_id, "state/wrist/arrived")
@@ -108,11 +123,18 @@ class WristNode(BaseNode):
         self.subscribe(self.cmd_angle_topic, self._on_cmd_angle)
         self.subscribe(self.cmd_claw_topic, self._on_cmd_claw)
         self.subscribe(self.cmd_intake_speed_topic, self._on_cmd_intake_speed)
+        self.subscribe(self.cmd_indicator_topic, self._on_cmd_indicator_color)
 
         # Runtime state
         self._state = WristState()
         self._target_angle = 0.0
         self._last_intake_cmd: float | None = None
+        self._last_indicator_pulse: int | None = None
+
+        # Precompute indicator color PWM counts using servo controller frequency
+        self._indicator_pwm: dict[str, int] = {}
+        for name, micros in _INDICATOR_COLOR_US.items():
+            self._indicator_pwm[name] = self._us_to_pwm_counts(micros)
 
         # Hardware init
         self.pwm = None
@@ -161,6 +183,33 @@ class WristNode(BaseNode):
         pulse = int(round(self.servo_min + t * (self.servo_max - self.servo_min)))
         return int(self._clamp(pulse, self.servo_min, self.servo_max))
 
+    def _us_to_pwm_counts(self, micros: float) -> int:
+        freq = max(float(self.pwm_freq), 1e-6)
+        counts = int(round(float(micros) * freq * 4096.0 / 1_000_000.0))
+        return int(self._clamp(counts, 0, 4095))
+
+    def _normalize_indicator_color(self, sample) -> str | None:
+        try:
+            if isinstance(sample, str):
+                color = sample.strip().lower()
+            elif isinstance(sample, (bytes, bytearray)):
+                color = bytes(sample).decode().strip().lower()
+            elif isinstance(sample, dict):
+                for key in ("color", "value", "state"):
+                    if key in sample and isinstance(sample[key], str):
+                        nested = sample[key].strip().lower()
+                        if nested in self._indicator_pwm:
+                            return nested
+                color = str(sample).strip().lower()
+            else:
+                color = str(sample).strip().lower()
+        except Exception:
+            return None
+
+        if color in self._indicator_pwm:
+            return color
+        return None
+
     def _set_servo(self, channel: int, pulse: int):
         if self.pwm is None:
             return
@@ -184,6 +233,17 @@ class WristNode(BaseNode):
         self._set_servo(self.intake_esc_left, pulse)
         self._set_servo(self.intake_esc_right, pulse)
         logger.debug(f"Intake power {power:.2f} -> pulse {pulse}")
+
+    def _set_indicator_color(self, color: str) -> None:
+        pulse = self._indicator_pwm.get(color)
+        if pulse is None:
+            logger.debug(f"Indicator color '{color}' has no mapped pulse")
+            return
+        if self._last_indicator_pulse == pulse:
+            return
+        self._set_servo(self.indicator_channel, pulse)
+        self._last_indicator_pulse = pulse
+        logger.debug(f"Indicator color {color} -> pulse {pulse}")
 
     def _resolve_claw_mode(self, sample) -> str | None:
         try:
@@ -273,6 +333,16 @@ class WristNode(BaseNode):
         self._last_intake_cmd = clamped
         self._state.intake_power = clamped
         self._apply_intake_power(clamped)
+
+    def _on_cmd_indicator_color(self, sample) -> None:
+        color = self._normalize_indicator_color(sample)
+        if color is None:
+            logger.debug(f"Invalid indicator color sample: {sample}")
+            return
+        if self._state.indicator_color == color:
+            return
+        self._state.indicator_color = color
+        self._set_indicator_color(color)
 
     # --- Node loop ---
     def step(self):
