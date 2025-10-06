@@ -11,7 +11,7 @@ nodes:
       max_angular_speed: 2.0  # Maximum angular velocity (rad/s)
       deadzone: 0.05  # Controller deadzone
       field_relative: false  # Use odometry to drive in field frame
-      indicator_color: "green"
+      indicator_color: "red"
 
   # Go-To-Position controller node (publishes autonomy twist)
   - type: nodes.goto_node.GoToPositionNode

@@ -87,7 +87,7 @@ class WristNode(BaseNode):
         self.claw_channel = int(cfg.get("claw_channel", 1))
         self.intake_esc_left = int(cfg.get("intake_esc_left", 2))
         self.intake_esc_right = int(cfg.get("intake_esc_right", 3))
-        self.indicator_channel = int(cfg.get("indicator_channel", 4))
+        self.indicator_channel = int(cfg.get("indicator_channel", 15))
 
         # Servo pulse bounds (PCA9685 tick counts, 0..4095). Typical ~150..600 at 60Hz.
         self.servo_min = int(cfg.get("servo_min", 150))
