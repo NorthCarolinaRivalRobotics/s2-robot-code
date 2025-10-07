@@ -160,12 +160,15 @@ class WristNode(BaseNode):
         )
 
         # arming sequence for the intakes
-        self._apply_intake_power(0.0)
-        time.sleep(1.0)
-        self._apply_intake_power(1.0)
-        time.sleep(1.0)
-        self._apply_intake_power(0.0)
-        time.sleep(1.0)
+        # self._apply_intake_power(0.0)
+        # time.sleep(1.0)
+        # self._apply_intake_power(1.0)
+        # time.sleep(1.0)
+        # self._apply_intake_power(0.0)
+        # time.sleep(1.0)
+        self._ramp_intake_power(0.0, 1.0)
+        self._ramp_intake_power(1.0, 1.0)
+        self._ramp_intake_power(0.0, 1.0)
 
     # --- Helpers ---
     def _clamp(self, v: float, lo: float, hi: float) -> float:
@@ -361,3 +364,14 @@ class WristNode(BaseNode):
         logger.info("WristNode shutting down")
         # Leave servos at last commanded position; optionally move claw to closed
         super().cleanup()
+
+
+    def _ramp_intake_power(self, power: float, duration: float) -> None:
+        start_power = self._state.intake_power
+        end_power = power
+        start_time = time.time()
+        end_time = start_time + duration
+        while time.time() < end_time:
+            t = (time.time() - start_time) / duration
+            self._apply_intake_power(start_power + t * (end_power - start_power))
+            time.sleep(0.01)

@@ -30,6 +30,7 @@ CLAW_SPEAR = "SPEAR"
 _CLAW_STATES = {CLAW_CLOSED, CLAW_OPEN, CLAW_SPEAR}
 
 _INDICATOR_COLORS = {
+    "off",
     "red",
     "orange",
     "yellow",
@@ -121,7 +122,6 @@ class TeleopNode(BaseNode):
         
         # Initialize logging
         self.logger = logging.getLogger(f"Teleop_{self.robot_id}")
-        self._initialize_indicator_color_map()
         
         # Initialize PS5 controller
         self._init_controller()
@@ -138,6 +138,7 @@ class TeleopNode(BaseNode):
         self._arm_indicator_color_cfg = raw_indicator_map if isinstance(raw_indicator_map, dict) else {}
         self._arm_indicator_color_map: dict[str, str] = {}
         self._startup_indicator_color = self._normalize_indicator_color((config or {}).get("indicator_color"))
+        self._initialize_indicator_color_map()
         
         # Arm control state (driver station side - manual increments)
         self.arm_target = np.array([0.0, 0.0], dtype=float)  # [shoulder, elbow] in joint revs
@@ -149,7 +150,7 @@ class TeleopNode(BaseNode):
         self.arm_intermediate_end_velocity_frac = float((config or {}).get('arm_intermediate_end_velocity_frac', -0.1))
 
         # Arm state machine
-        self._arm_state = 'STOW'  # INIT -> STOW immediately at start
+        self._arm_state = 'LEGAL_START'  # INIT -> STOW immediately at start
         self._last_transition_ts = 0.0
         self._debounce_s = float((config or {}).get('arm_button_debounce_s', 0.2))
         self._btn_prev: dict[str, bool] = {}
@@ -755,7 +756,7 @@ class TeleopNode(BaseNode):
             r2 = 0.11
         l2_now = l2 > 0.5
         r2_now = r2 > 0.5
-        self._publish_intake_power(r2 - l2)
+        self._publish_intake_power(r2)
         # if l2_now and not self._l2_active:
         #     # SILO position (placeholder zeros)
         #     try:
