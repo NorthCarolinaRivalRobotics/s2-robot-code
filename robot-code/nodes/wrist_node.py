@@ -76,6 +76,7 @@ class WristNode(BaseNode):
         self.update_rate = float(cfg.get("update_rate", 30.0))
         self.travel_speed = float(cfg.get("travel_speed", 1.0))  # rad/s estimate
         self.hz = self.update_rate
+        self._intake_rate_limit = float(cfg.get("intake_rate_limit", 1.0))  # power units per second
 
         # PCA9685 configuration (matches example API)
         self.pca_addr = int(cfg.get("pca9685_address", 0x40))
@@ -130,6 +131,8 @@ class WristNode(BaseNode):
         self._target_angle = 0.0
         self._last_intake_cmd: float | None = None
         self._last_indicator_pulse: int | None = None
+        self._intake_target = self._state.intake_power
+        self._last_intake_update_ts = time.time()
 
         # Precompute indicator color PWM counts using servo controller frequency
         self._indicator_pwm: dict[str, int] = {}
@@ -169,6 +172,7 @@ class WristNode(BaseNode):
         self._ramp_intake_power(0.0, 1.0)
         self._ramp_intake_power(1.0, 1.0)
         self._ramp_intake_power(0.0, 1.0)
+        self._intake_target = self._state.intake_power
 
     # --- Helpers ---
     def _clamp(self, v: float, lo: float, hi: float) -> float:
@@ -334,8 +338,7 @@ class WristNode(BaseNode):
         if self._last_intake_cmd is not None and abs(clamped - self._last_intake_cmd) < 1e-3:
             return
         self._last_intake_cmd = clamped
-        self._state.intake_power = clamped
-        self._apply_intake_power(clamped)
+        self._intake_target = clamped
 
     def _on_cmd_indicator_color(self, sample) -> None:
         color = self._normalize_indicator_color(sample)
@@ -350,6 +353,19 @@ class WristNode(BaseNode):
     # --- Node loop ---
     def step(self):
         now = time.time()
+        dt = max(0.0, now - self._last_intake_update_ts)
+        target = self._intake_target
+        current_power = self._state.intake_power
+        if dt > 0.0:
+            max_delta = self._intake_rate_limit * dt
+            delta = target - current_power
+            if abs(delta) > 1e-4 and max_delta > 0.0:
+                limited_delta = max(-max_delta, min(max_delta, delta))
+                new_power = self._clamp(current_power + limited_delta, -1.0, 1.0)
+                if abs(new_power - current_power) > 1e-4:
+                    self._state.intake_power = new_power
+                    self._apply_intake_power(new_power)
+        self._last_intake_update_ts = now
         if self._state.busy and now >= self._state.eta_ts:
             self._state.busy = False
             self._state.angle = float(self._target_angle)
@@ -372,6 +388,17 @@ class WristNode(BaseNode):
         start_time = time.time()
         end_time = start_time + duration
         while time.time() < end_time:
-            t = (time.time() - start_time) / duration
-            self._apply_intake_power(start_power + t * (end_power - start_power))
+            now = time.time()
+            t = (now - start_time) / max(duration, 1e-6)
+            current_power = start_power + t * (end_power - start_power)
+            current_power = self._clamp(current_power, -1.0, 1.0)
+            self._state.intake_power = current_power
+            self._apply_intake_power(current_power)
+            self._last_intake_update_ts = now
             time.sleep(0.01)
+        final_power = self._clamp(end_power, -1.0, 1.0)
+        self._state.intake_power = final_power
+        self._apply_intake_power(final_power)
+        self._last_intake_update_ts = time.time()
+        self._intake_target = final_power
+        self._last_intake_cmd = final_power

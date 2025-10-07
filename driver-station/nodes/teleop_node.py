@@ -106,6 +106,9 @@ class TeleopNode(BaseNode):
         self.goto_start_topic = robot_topic(self.robot_id, "ui/goto/start")
         self.goto_cancel_topic = robot_topic(self.robot_id, "ui/goto/cancel")
 
+        # Initialize logging early so helpers can use it
+        self.logger = logging.getLogger(f"Teleop_{self.robot_id}")
+
         # Odometry subscription for field-relative driving
         self.current_theta = 0.0
         self.current_x = 0.0
@@ -116,12 +119,16 @@ class TeleopNode(BaseNode):
         self._prev_pose_ts = None
         self.subscribe(self.odom_topic, self._on_odometry)
         # Arm joint position subscription
-        self._arm_pos: tuple[float, float] | None = None  # (shoulder_rad, elbow_rad)
+        self._arm_pos: tuple[float, float] | None = None  # corrected (shoulder_rad, elbow_rad)
+        self._arm_pos_raw: tuple[float, float] | None = None
         self._arm_pos_ts: float | None = None
         self.subscribe(self.arm_pos_topic, self._on_arm_position)
-        
-        # Initialize logging
-        self.logger = logging.getLogger(f"Teleop_{self.robot_id}")
+
+        # Arm joint angle offsets (shoulder, elbow)
+        self._arm_angle_offsets = np.array([0.0, 0.0], dtype=float)
+        self.arm_offset_topic = robot_topic(self.robot_id, "cmd/arm/offsets")
+        self._load_initial_arm_offsets(config or {})
+        self.subscribe(self.arm_offset_topic, self._on_arm_offsets)
         
         # Initialize PS5 controller
         self._init_controller()
@@ -174,6 +181,9 @@ class TeleopNode(BaseNode):
         STOW = np.array([UP - np.deg2rad(10.0) - np.deg2rad(25), np.deg2rad(263.0) + np.deg2rad(20)], dtype=float)
 
         self.angle_pid = AnglePID(kp=1.5, ki=0.00, kd=0.00)
+
+        # Track last published arm command to reapply after offset updates
+        self._last_arm_command: dict | None = None
 
         self._pose_map = {
             "LEGAL_START": np.array([np.deg2rad(-105), UP + np.deg2rad(45.0)], dtype=float),
@@ -241,16 +251,102 @@ class TeleopNode(BaseNode):
 
         self.is_first_arm_update = True
 
+    def _load_initial_arm_offsets(self, cfg: dict) -> None:
+        raw_offsets = cfg.get("arm_joint_offsets_rad")
+        if raw_offsets is None:
+            raw_offsets = cfg.get("arm_joint_offsets_deg")
+            if raw_offsets is not None:
+                parsed = self._parse_arm_offsets(raw_offsets)
+                if parsed is not None:
+                    self._arm_angle_offsets = np.deg2rad(parsed)
+                    return
+        parsed = self._parse_arm_offsets(raw_offsets)
+        if parsed is not None:
+            self._arm_angle_offsets = parsed
+
+    def _parse_arm_offsets(self, raw) -> np.ndarray | None:
+        if raw is None:
+            return None
+        try:
+            if isinstance(raw, dict):
+                shoulder = float(raw.get("shoulder", 0.0))
+                elbow = float(raw.get("elbow", 0.0))
+            elif isinstance(raw, (list, tuple)) and len(raw) >= 2:
+                shoulder = float(raw[0])
+                elbow = float(raw[1])
+            else:
+                return None
+            return np.array([shoulder, elbow], dtype=float)
+        except Exception:
+            self.logger.debug("Failed to parse arm offset config; using zeros")
+            return None
+
     def _on_arm_position(self, sample):
         """Handle arm joint position Vector2: x=shoulder rad, y=elbow rad."""
         try:
             print("case 2")
             shoulder = float(sample["x"])  # type: ignore[index]
             elbow = float(sample["y"])    # type: ignore[index]
-            self._arm_pos = (shoulder, elbow)
+            self._arm_pos_raw = (shoulder, elbow)
+            corrected = self._apply_offsets_to_measurement(shoulder, elbow)
+            self._arm_pos = corrected
             self._arm_pos_ts = time.time()
         except Exception as e:
             self.logger.debug(f"Failed to parse arm position: {e}")
+
+    def _apply_offsets_to_measurement(self, shoulder: float, elbow: float) -> tuple[float, float]:
+        corrected = np.array([shoulder, elbow], dtype=float) - self._arm_angle_offsets
+        return float(corrected[0]), float(corrected[1])
+
+    def _apply_offsets_to_command(self, shoulder: float, elbow: float) -> tuple[float, float]:
+        commanded = np.array([shoulder, elbow], dtype=float) + self._arm_angle_offsets
+        return float(commanded[0]), float(commanded[1])
+
+    def _reapply_arm_command(self) -> None:
+        if not self._last_arm_command:
+            return
+        cmd = self._last_arm_command
+        try:
+            if cmd.get("mode") == "manual":
+                self._publish_manual_arm_target(cmd["shoulder"], cmd["elbow"], cmd.get("end_velocity_frac", 0.0))
+            else:
+                self._arm_publish_targets(
+                    float(cmd["shoulder"]),
+                    float(cmd["elbow"]),
+                    float(cmd["wrist"]),
+                    str(cmd["claw_state"]),
+                    end_velocity_frac=float(cmd.get("end_velocity_frac", 0.0)),
+                )
+        except Exception as e:
+            self.logger.debug(f"Failed to reapply arm command after offset update: {e}")
+
+    def _on_arm_offsets(self, sample) -> None:
+        try:
+            if isinstance(sample, dict):
+                shoulder = float(sample.get("x") if "x" in sample else sample.get("shoulder", 0.0))
+                elbow = float(sample.get("y") if "y" in sample else sample.get("elbow", 0.0))
+            else:
+                shoulder = float(getattr(sample, "x", getattr(sample, "shoulder", 0.0)))
+                elbow = float(getattr(sample, "y", getattr(sample, "elbow", 0.0)))
+        except Exception:
+            self.logger.debug(f"Failed to parse arm offset message: {sample}")
+            return
+
+        new_offsets = np.array([shoulder, elbow], dtype=float)
+        if np.allclose(new_offsets, self._arm_angle_offsets):
+            return
+
+        self._arm_angle_offsets = new_offsets
+        self.logger.info(
+            f"Updated arm joint offsets (shoulder={self._arm_angle_offsets[0]:+.4f} rad, "
+            f"elbow={self._arm_angle_offsets[1]:+.4f} rad)"
+        )
+
+        if self._arm_pos_raw is not None:
+            corrected = self._apply_offsets_to_measurement(*self._arm_pos_raw)
+            self._arm_pos = corrected
+
+        self._reapply_arm_command()
 
     def _on_odometry(self, sample):
         """Update the latest robot yaw from odometry (radians)."""
@@ -472,24 +568,18 @@ class TeleopNode(BaseNode):
         # Update and publish
         self.arm_target[0] += d_shoulder
         self.arm_target[1] += d_elbow
-        try:
-            # Publish as Vector3 with zero end-velocity for manual nudges.
-            self.put(
-                self.arm_cmd_topic,
-                to_zenoh_value(Vector3(x=float(self.arm_target[0]), y=float(self.arm_target[1]), z=0.0)),
-            )
-        except Exception as e:
-            self.logger.debug(f"Failed to publish arm target: {e}")
+        self._publish_manual_arm_target(float(self.arm_target[0]), float(self.arm_target[1]), 0.0)
         self._arm_last_hat = hat
         self._arm_last_emit = now
 
     def _arm_publish_targets(self, shoulder: float, elbow: float, wrist_angle: float, claw_state: str, *, end_velocity_frac: float = 0.0):
         # Arm joints
         try:
+            cmd_shoulder, cmd_elbow = self._apply_offsets_to_command(shoulder, elbow)
             # Publish desired end-velocity fraction in z for intermediate waypoints
             self.put(
                 self.arm_cmd_topic,
-                to_zenoh_value(Vector3(x=float(shoulder), y=float(elbow), z=float(end_velocity_frac))),
+                to_zenoh_value(Vector3(x=float(cmd_shoulder), y=float(cmd_elbow), z=float(end_velocity_frac))),
             )
         except Exception as e:
             self.logger.info(f"Failed to publish arm target: {e}")
@@ -500,6 +590,30 @@ class TeleopNode(BaseNode):
             self.logger.info(f"Failed to publish wrist angle: {e}")
         # Claw command (driven elsewhere via toggle)
         self._publish_claw_state(claw_state)
+        self._last_arm_command = {
+            "mode": "state",
+            "shoulder": float(shoulder),
+            "elbow": float(elbow),
+            "wrist": float(wrist_angle),
+            "claw_state": str(claw_state),
+            "end_velocity_frac": float(end_velocity_frac),
+        }
+
+    def _publish_manual_arm_target(self, shoulder: float, elbow: float, end_velocity_frac: float = 0.0) -> None:
+        try:
+            cmd_shoulder, cmd_elbow = self._apply_offsets_to_command(shoulder, elbow)
+            self.put(
+                self.arm_cmd_topic,
+                to_zenoh_value(Vector3(x=float(cmd_shoulder), y=float(cmd_elbow), z=float(end_velocity_frac))),
+            )
+            self._last_arm_command = {
+                "mode": "manual",
+                "shoulder": float(shoulder),
+                "elbow": float(elbow),
+                "end_velocity_frac": float(end_velocity_frac),
+            }
+        except Exception as e:
+            self.logger.debug(f"Failed to publish manual arm target: {e}")
 
     def _publish_claw_state(self, state: str, *, log: bool = False) -> None:
         if state not in _CLAW_STATES:

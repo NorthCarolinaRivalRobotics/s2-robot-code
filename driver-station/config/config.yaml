@@ -12,6 +12,18 @@ nodes:
       deadzone: 0.05  # Controller deadzone
       field_relative: true  # Use odometry to drive in field frame
       indicator_color: "red"
+      arm_joint_offsets_deg:
+        shoulder: 0.0
+        elbow: 0.0
+
+  # Arm offset adjustment UI
+  - type: nodes.arm_offset_ui_node.ArmOffsetUINode
+    params:
+      robot_id: "cash"
+      update_rate: 20.0
+      arm_joint_offsets_deg:
+        shoulder: 0.0
+        elbow: 0.0
 
   # Go-To-Position controller node (publishes autonomy twist)
   - type: nodes.goto_node.GoToPositionNode
