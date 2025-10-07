@@ -5,8 +5,6 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "matplotlib>=3.10.6",
-    "pyqt5>=5.15.11",
     "pytest>=8.4.1",
     "tide-sdk>=0.1.12",
 ]
@@ -14,6 +12,7 @@ dependencies = [
 [project.optional-dependencies]
 laptop = [
     "pygame>=2.6.1",
+    "pyqt5>=5.15.11",
 ]
 robot = [
     "moteus-pi3hat>=0.3.31",
