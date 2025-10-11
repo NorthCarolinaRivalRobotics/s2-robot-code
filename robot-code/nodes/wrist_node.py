@@ -88,6 +88,7 @@ class WristNode(BaseNode):
         self.claw_channel = int(cfg.get("claw_channel", 1))
         self.intake_esc_left = int(cfg.get("intake_esc_left", 2))
         self.intake_esc_right = int(cfg.get("intake_esc_right", 3))
+        self.roller_esc = int(cfg.get("roller_esc", 4))
         self.indicator_channel = int(cfg.get("indicator_channel", 15))
 
         # Servo pulse bounds (PCA9685 tick counts, 0..4095). Typical ~150..600 at 60Hz.
@@ -239,6 +240,7 @@ class WristNode(BaseNode):
         pulse = self._power_to_pulse(power)
         self._set_servo(self.intake_esc_left, pulse)
         self._set_servo(self.intake_esc_right, pulse)
+        self._set_servo(self.roller_esc, pulse)
         logger.debug(f"Intake power {power:.2f} -> pulse {pulse}")
 
     def _set_indicator_color(self, color: str) -> None:
