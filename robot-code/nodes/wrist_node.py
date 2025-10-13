@@ -110,7 +110,9 @@ class WristNode(BaseNode):
 
         self.roller_esc_min = _resolve_pwm_value("roller_esc_min", "roller_esc_min_us", self.esc_min)
         self.roller_esc_max = _resolve_pwm_value("roller_esc_max", "roller_esc_max_us", self.esc_max)
-        self.roller_esc_neutral = _resolve_pwm_value("roller_esc_neutral", "roller_esc_neutral_us", self.esc_neutral)
+        self.roller_esc_neutral = _resolve_pwm_value(
+            "roller_esc_neutral", "roller_esc_neutral_us", self.roller_esc_min
+        )
         self.roller_power_scale = float(cfg.get("roller_power_scale", 1.0))
 
         # Wrist mechanical range in radians mapped linearly to [servo_min, servo_max]
@@ -242,9 +244,11 @@ class WristNode(BaseNode):
         return self._power_to_pulse_with_bounds(power, self.esc_min, self.esc_neutral, self.esc_max)
 
     def _roller_power_to_pulse(self, power: float) -> int:
-        return self._power_to_pulse_with_bounds(
-            power, self.roller_esc_min, self.roller_esc_neutral, self.roller_esc_max
-        )
+        # Roller ESC is wired for single-direction operation (idle at low pulse, throttle up to high).
+        positive_power = self._clamp(power, 0.0, 1.0)
+        span = max(self.roller_esc_max - self.roller_esc_min, 1)
+        pulse = self.roller_esc_min + int(round(positive_power * span))
+        return int(self._clamp(pulse, self.roller_esc_min, self.roller_esc_max))
 
     def _power_to_pulse_with_bounds(self, power: float, lo: int, neutral: int, hi: int) -> int:
         clamped = max(-1.0, min(1.0, float(power)))
@@ -261,7 +265,7 @@ class WristNode(BaseNode):
         self._set_servo(self.intake_esc_left, intake_pulse)
         self._set_servo(self.intake_esc_right, intake_pulse)
 
-        roller_power = self._clamp(power * self.roller_power_scale, -1.0, 1.0)
+        roller_power = self._clamp(power * self.roller_power_scale, 0.0, 1.0)
         roller_pulse = self._roller_power_to_pulse(roller_power)
         self._set_servo(self.roller_esc, roller_pulse)
         logger.debug(
