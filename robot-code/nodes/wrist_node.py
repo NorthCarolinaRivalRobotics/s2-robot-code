@@ -101,20 +101,6 @@ class WristNode(BaseNode):
         default_neutral = int(round((123 + 492) * 0.5))
         self.esc_neutral = int(cfg.get("intake_esc_neutral", default_neutral))
 
-        def _resolve_pwm_value(key_ticks: str, key_us: str, default: int) -> int:
-            if key_ticks in cfg:
-                return int(cfg[key_ticks])
-            if key_us in cfg:
-                return self._us_to_pwm_counts(float(cfg[key_us]))
-            return default
-
-        self.roller_esc_min = _resolve_pwm_value("roller_esc_min", "roller_esc_min_us", self.esc_min)
-        self.roller_esc_max = _resolve_pwm_value("roller_esc_max", "roller_esc_max_us", self.esc_max)
-        self.roller_esc_neutral = _resolve_pwm_value(
-            "roller_esc_neutral", "roller_esc_neutral_us", self.roller_esc_min
-        )
-        self.roller_power_scale = float(cfg.get("roller_power_scale", 1.0))
-
         # Wrist mechanical range in radians mapped linearly to [servo_min, servo_max]
         self.wrist_min_rad = float(cfg.get("wrist_min_rad", 0.0))
         self.wrist_max_rad = float(cfg.get("wrist_max_rad", np.pi))
@@ -241,40 +227,21 @@ class WristNode(BaseNode):
             logger.warning(f"Failed to set PWM on ch{channel}: {e}")
 
     def _power_to_pulse(self, power: float) -> int:
-        return self._power_to_pulse_with_bounds(power, self.esc_min, self.esc_neutral, self.esc_max)
-
-    def _roller_power_to_pulse(self, power: float) -> int:
-        # Roller ESC is wired for single-direction operation (idle at low pulse, throttle up to high).
-        positive_power = self._clamp(power, 0.0, 1.0)
-        span = max(self.roller_esc_max - self.roller_esc_min, 1)
-        pulse = self.roller_esc_min + int(round(positive_power * span))
-        return int(self._clamp(pulse, self.roller_esc_min, self.roller_esc_max))
-
-    def _power_to_pulse_with_bounds(self, power: float, lo: int, neutral: int, hi: int) -> int:
         clamped = max(-1.0, min(1.0, float(power)))
-        hi_span = max(hi - neutral, 1)
-        lo_span = max(neutral - lo, 1)
+        hi_span = max(self.esc_max - self.esc_neutral, 1)
+        lo_span = max(self.esc_neutral - self.esc_min, 1)
         if clamped >= 0.0:
-            pulse = neutral + int(round(clamped * hi_span))
+            pulse = self.esc_neutral + int(round(clamped * hi_span))
         else:
-            pulse = neutral + int(round(clamped * lo_span))
-        return int(self._clamp(pulse, lo, hi))
+            pulse = self.esc_neutral + int(round(clamped * lo_span))
+        return int(self._clamp(pulse, self.esc_min, self.esc_max))
 
     def _apply_intake_power(self, power: float) -> None:
-        intake_pulse = self._power_to_pulse(power)
-        self._set_servo(self.intake_esc_left, intake_pulse)
-        self._set_servo(self.intake_esc_right, intake_pulse)
-
-        roller_power = self._clamp(power * self.roller_power_scale, 0.0, 1.0)
-        roller_pulse = self._roller_power_to_pulse(roller_power)
-        self._set_servo(self.roller_esc, roller_pulse)
-        logger.debug(
-            "Intake power %.2f -> pulse %d | Roller power %.2f -> pulse %d",
-            power,
-            intake_pulse,
-            roller_power,
-            roller_pulse,
-        )
+        pulse = self._power_to_pulse(power)
+        self._set_servo(self.intake_esc_left, pulse)
+        self._set_servo(self.intake_esc_right, pulse)
+        self._set_servo(self.roller_esc, pulse)
+        logger.debug(f"Intake power {power:.2f} -> pulse {pulse}")
 
     def _set_indicator_color(self, color: str) -> None:
         pulse = self._indicator_pwm.get(color)
