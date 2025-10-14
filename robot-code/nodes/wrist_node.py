@@ -52,6 +52,7 @@ class WristState:
     busy: bool = False
     eta_ts: float = 0.0
     intake_power: float = 0.0
+    roller_power: float = 0.0
     indicator_color: str = ""
 
 
