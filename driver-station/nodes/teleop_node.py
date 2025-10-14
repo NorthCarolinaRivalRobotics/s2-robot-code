@@ -29,6 +29,7 @@ CLAW_OPEN = "OPEN"
 CLAW_SPEAR = "SPEAR"
 _CLAW_STATES = {CLAW_CLOSED, CLAW_OPEN, CLAW_SPEAR}
 
+
 _INDICATOR_COLORS = {
     "off",
     "red",
@@ -63,6 +64,7 @@ class TeleopNode(BaseNode):
         self.deadzone = 0.05
         self.field_relative = True  # Convert joystick to field-relative driving
         self.CLAW_OFFSET_ANGLE = np.deg2rad(-7.0)
+        self.ROLLER_POWER = 0.25
 
         # Target pose UI (for Go-To node)
         self.target_pose = np.array([0.0, 0.0, 0.0])  # x, y, theta
@@ -80,6 +82,7 @@ class TeleopNode(BaseNode):
             # Arm position proximity tolerance (radians) for state transitions
             # If not provided, default to ~3 degrees.
             self.arm_pos_tol_rad = float(config.get("arm_position_tolerance_rad", math.radians(3.0)))
+            self.ROLLER_POWER = config.get("roller_power", self.ROLLER_POWER)
         else:
             self.arm_pos_tol_rad = math.radians(3.0)
         
@@ -100,6 +103,7 @@ class TeleopNode(BaseNode):
         self.wrist_angle_topic = robot_topic(self.robot_id, "cmd/wrist/angle")
         self.claw_cmd_topic = robot_topic(self.robot_id, "cmd/wrist/claw")
         self.intake_speed_topic = robot_topic(self.robot_id, "cmd/wrist/intake_speed")
+        self.roller_speed_topic = robot_topic(self.robot_id, "cmd/wrist/roller_speed")
         self.indicator_color_topic = robot_topic(self.robot_id, "cmd/wrist/light_color")
         self.heading_zero_topic = robot_topic(self.robot_id, "cmd/odometry/rezero_yaw")
         # Go-To control events
@@ -139,6 +143,7 @@ class TeleopNode(BaseNode):
         # Teleop publish gating: only publish when inputs are active
         self._teleop_active = False
         self._last_intake_power: float | None = None
+        self._last_roller_power: float | None = None
         self.intake_power_deadband = float((config or {}).get("intake_power_deadband", 0.05))
         self._indicator_color: str | None = None
         raw_indicator_map = (config or {}).get("arm_indicator_color_map", {})
@@ -782,8 +787,6 @@ class TeleopNode(BaseNode):
         if s == 'STOW':
             if pressed('triangle'):
                 self._arm_state = 'PLACE_HEAD_WRIST_TRAVEL'; transitioned = True; self._wrist_travel_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
-            elif pressed('square'):
-                self._arm_state = 'PLACE_SIDE_WRIST_TRAVEL'; transitioned = True; self._wrist_travel_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
             elif pressed('circle'):
                 self._arm_state = 'SILO_IN'; transitioned = True
             elif pressed('cross'):
@@ -909,6 +912,21 @@ class TeleopNode(BaseNode):
         except Exception as e:
             self.logger.debug(f"Failed to publish intake power: {e}")
 
+    def _publish_roller_power(self, power: float) -> None:
+        try:
+            clamped = max(-1.0, min(1.0, float(power)))
+        except Exception:
+            clamped = 0.0
+        if abs(clamped) < self.intake_power_deadband:
+            clamped = 0.0
+        if self._last_roller_power is not None and abs(clamped - self._last_roller_power) < 1e-3:
+            return
+        try:
+            self.put(self.roller_speed_topic, to_zenoh_value(float(clamped)))
+            self._last_roller_power = clamped
+        except Exception as e:
+            self.logger.debug(f"Failed to publish roller power: {e}")
+
     
     def _create_twist_message(self, linear_x, linear_y, angular_z):
         """Create a twist message."""
@@ -936,6 +954,9 @@ class TeleopNode(BaseNode):
             # Read controller inputs
             inputs = self._read_controller_inputs()
             buttons = self._read_buttons()
+            square_active = bool(buttons.get('square')) if buttons else False
+            roller_command = self.ROLLER_POWER if square_active else 0.0
+            self._publish_roller_power(roller_command)
             
             # Get twist commands from controller (joystick frame)
             linear_x = inputs['linear_x']

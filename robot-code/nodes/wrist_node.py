@@ -52,6 +52,7 @@ class WristState:
     busy: bool = False
     eta_ts: float = 0.0
     intake_power: float = 0.0
+    roller_power: float = 0.0
     indicator_color: str = ""
 
 
@@ -61,11 +62,13 @@ class WristNode(BaseNode):
       - cmd/wrist/angle: float (radians)
       - cmd/wrist/claw: bool (True=open)
       - cmd/wrist/intake_speed: float (-1..1 power)
+      - cmd/wrist/roller_speed: float (-1..1 power)
 
       - state/wrist/angle: float
       - state/wrist/claw: bool
       - state/wrist/arrived: bool
       - state/wrist/intake_power: float (-1..1 echo)
+      - state/wrist/roller_power: float (-1..1 echo)
     """
 
     def __init__(self, *, config=None):
@@ -77,6 +80,7 @@ class WristNode(BaseNode):
         self.travel_speed = float(cfg.get("travel_speed", 1.0))  # rad/s estimate
         self.hz = self.update_rate
         self._intake_rate_limit = float(cfg.get("intake_rate_limit", 1.0))  # power units per second
+        self._roller_rate_limit = float(cfg.get("roller_rate_limit", self._intake_rate_limit))
 
         # PCA9685 configuration (matches example API)
         self.pca_addr = int(cfg.get("pca9685_address", 0x40))
@@ -115,25 +119,31 @@ class WristNode(BaseNode):
         self.cmd_angle_topic = robot_topic(self.robot_id, "cmd/wrist/angle")
         self.cmd_claw_topic = robot_topic(self.robot_id, "cmd/wrist/claw")
         self.cmd_intake_speed_topic = robot_topic(self.robot_id, "cmd/wrist/intake_speed")
+        self.cmd_roller_speed_topic = robot_topic(self.robot_id, "cmd/wrist/roller_speed")
         self.cmd_indicator_topic = robot_topic(self.robot_id, "cmd/wrist/light_color")
         self.state_angle_topic = robot_topic(self.robot_id, "state/wrist/angle")
         self.state_claw_topic = robot_topic(self.robot_id, "state/wrist/claw")
         self.state_arrived_topic = robot_topic(self.robot_id, "state/wrist/arrived")
         self.state_intake_power_topic = robot_topic(self.robot_id, "state/wrist/intake_power")
+        self.state_roller_power_topic = robot_topic(self.robot_id, "state/wrist/roller_power")
 
         # Subscribe to commands
         self.subscribe(self.cmd_angle_topic, self._on_cmd_angle)
         self.subscribe(self.cmd_claw_topic, self._on_cmd_claw)
         self.subscribe(self.cmd_intake_speed_topic, self._on_cmd_intake_speed)
+        self.subscribe(self.cmd_roller_speed_topic, self._on_cmd_roller_speed)
         self.subscribe(self.cmd_indicator_topic, self._on_cmd_indicator_color)
 
         # Runtime state
         self._state = WristState()
         self._target_angle = 0.0
         self._last_intake_cmd: float | None = None
+        self._last_roller_cmd: float | None = None
         self._last_indicator_pulse: int | None = None
         self._intake_target = self._state.intake_power
+        self._roller_target = self._state.roller_power
         self._last_intake_update_ts = time.time()
+        self._last_roller_update_ts = time.time()
 
         # Precompute indicator color PWM counts using servo controller frequency
         self._indicator_pwm: dict[str, int] = {}
@@ -159,8 +169,9 @@ class WristNode(BaseNode):
             logger.warning("Adafruit_PCA9685 not available; running without hardware control")
 
         logger.info(
-            f"WristNode ready: cmd=({self.cmd_angle_topic}, {self.cmd_claw_topic}, {self.cmd_intake_speed_topic})"
-            f" state=({self.state_angle_topic}, {self.state_claw_topic}, {self.state_arrived_topic}, {self.state_intake_power_topic})"
+            "WristNode ready: "
+            f"cmd=({self.cmd_angle_topic}, {self.cmd_claw_topic}, {self.cmd_intake_speed_topic}, {self.cmd_roller_speed_topic}) "
+            f"state=({self.state_angle_topic}, {self.state_claw_topic}, {self.state_arrived_topic}, {self.state_intake_power_topic}, {self.state_roller_power_topic})"
         )
 
         # arming sequence for the intakes
@@ -170,10 +181,11 @@ class WristNode(BaseNode):
         # time.sleep(1.0)
         # self._apply_intake_power(0.0)
         # time.sleep(1.0)
-        self._ramp_intake_power(0.0, 1.0)
-        self._ramp_intake_power(1.0, 1.0)
-        self._ramp_intake_power(0.0, 1.0)
+        self._ramp_intake_and_roller_power(0.0, 0.0, 1.0)
+        self._ramp_intake_and_roller_power(1.0, 1.0, 1.0)
+        self._ramp_intake_and_roller_power(0.0, 0.0, 1.0)
         self._intake_target = self._state.intake_power
+        self._roller_target = self._state.roller_power
 
     # --- Helpers ---
     def _clamp(self, v: float, lo: float, hi: float) -> float:
@@ -240,8 +252,12 @@ class WristNode(BaseNode):
         pulse = self._power_to_pulse(power)
         self._set_servo(self.intake_esc_left, pulse)
         self._set_servo(self.intake_esc_right, pulse)
-        self._set_servo(self.roller_esc, pulse)
         logger.debug(f"Intake power {power:.2f} -> pulse {pulse}")
+
+    def _apply_roller_power(self, power: float) -> None:
+        pulse = self._power_to_pulse(power)
+        self._set_servo(self.roller_esc, pulse)
+        logger.debug(f"Roller power {power:.2f} -> pulse {pulse}")
 
     def _set_indicator_color(self, color: str) -> None:
         pulse = self._indicator_pwm.get(color)
@@ -342,6 +358,19 @@ class WristNode(BaseNode):
         self._last_intake_cmd = clamped
         self._intake_target = clamped
 
+    def _on_cmd_roller_speed(self, sample) -> None:
+        try:
+            logger.info(f"Roller speed sample: {sample}")
+            power = float(sample)
+        except Exception:
+            logger.debug(f"Invalid roller speed sample: {sample}")
+            return
+        clamped = max(-1.0, min(1.0, power))
+        if self._last_roller_cmd is not None and abs(clamped - self._last_roller_cmd) < 1e-3:
+            return
+        self._last_roller_cmd = clamped
+        self._roller_target = clamped
+
     def _on_cmd_indicator_color(self, sample) -> None:
         color = self._normalize_indicator_color(sample)
         if color is None:
@@ -355,19 +384,31 @@ class WristNode(BaseNode):
     # --- Node loop ---
     def step(self):
         now = time.time()
-        dt = max(0.0, now - self._last_intake_update_ts)
-        target = self._intake_target
-        current_power = self._state.intake_power
-        if dt > 0.0:
-            max_delta = self._intake_rate_limit * dt
-            delta = target - current_power
-            if abs(delta) > 1e-4 and max_delta > 0.0:
-                limited_delta = max(-max_delta, min(max_delta, delta))
-                new_power = self._clamp(current_power + limited_delta, -1.0, 1.0)
-                if abs(new_power - current_power) > 1e-4:
-                    self._state.intake_power = new_power
-                    self._apply_intake_power(new_power)
+        dt_intake = max(0.0, now - self._last_intake_update_ts)
+        dt_roller = max(0.0, now - self._last_roller_update_ts)
+
+        new_intake = self._rate_limit_power(
+            self._state.intake_power,
+            self._intake_target,
+            dt_intake,
+            self._intake_rate_limit,
+        )
+        if abs(new_intake - self._state.intake_power) > 1e-4:
+            self._state.intake_power = new_intake
+            self._apply_intake_power(new_intake)
         self._last_intake_update_ts = now
+
+        new_roller = self._rate_limit_power(
+            self._state.roller_power,
+            self._roller_target,
+            dt_roller,
+            self._roller_rate_limit,
+        )
+        if abs(new_roller - self._state.roller_power) > 1e-4:
+            self._state.roller_power = new_roller
+            self._apply_roller_power(new_roller)
+        self._last_roller_update_ts = now
+
         if self._state.busy and now >= self._state.eta_ts:
             self._state.busy = False
             self._state.angle = float(self._target_angle)
@@ -375,6 +416,7 @@ class WristNode(BaseNode):
             self.put(self.state_angle_topic, to_zenoh_value(float(self._state.angle)))
             self.put(self.state_arrived_topic, to_zenoh_value(not self._state.busy))
             self.put(self.state_intake_power_topic, to_zenoh_value(float(self._state.intake_power)))
+            self.put(self.state_roller_power_topic, to_zenoh_value(float(self._state.roller_power)))
         except Exception:
             pass
 
@@ -404,3 +446,51 @@ class WristNode(BaseNode):
         self._last_intake_update_ts = time.time()
         self._intake_target = final_power
         self._last_intake_cmd = final_power
+
+
+
+    def _rate_limit_power(self, current: float, target: float, dt: float, rate_limit: float) -> float:
+        clamped_target = self._clamp(target, -1.0, 1.0)
+        if dt <= 0.0 or rate_limit <= 0.0:
+            return clamped_target
+        delta = clamped_target - current
+        max_delta = rate_limit * dt
+        if abs(delta) <= max_delta:
+            return clamped_target
+        stepped = current + max(-max_delta, min(max_delta, delta))
+        return self._clamp(stepped, -1.0, 1.0)
+
+
+    def _ramp_intake_and_roller_power(self, intake_power: float, roller_power: float, duration: float) -> None:
+        start_intake_power = self._state.intake_power
+        start_roller_power = self._state.roller_power
+        end_intake_power = intake_power
+        end_roller_power = roller_power
+        start_time = time.time()
+        end_time = start_time + duration
+        while time.time() < end_time:
+            now = time.time()
+            t = (now - start_time) / max(duration, 1e-6)
+            current_intake_power = start_intake_power + t * (end_intake_power - start_intake_power)
+            current_roller_power = start_roller_power + t * (end_roller_power - start_roller_power)
+            current_intake_power = self._clamp(current_intake_power, -1.0, 1.0)
+            current_roller_power = self._clamp(current_roller_power, -1.0, 1.0)
+            self._state.intake_power = current_intake_power
+            self._state.roller_power = current_roller_power
+            self._apply_intake_power(current_intake_power)
+            self._apply_roller_power(current_roller_power)
+            self._last_intake_update_ts = now
+            self._last_roller_update_ts = now
+            time.sleep(0.01)
+        final_intake_power = self._clamp(end_intake_power, -1.0, 1.0)           
+        final_roller_power = self._clamp(end_roller_power, -1.0, 1.0)
+        self._state.intake_power = final_intake_power
+        self._state.roller_power = final_roller_power
+        self._apply_intake_power(final_intake_power)
+        self._apply_roller_power(final_roller_power)
+        self._last_intake_update_ts = time.time()
+        self._last_roller_update_ts = time.time()
+        self._intake_target = final_intake_power
+        self._roller_target = final_roller_power
+        self._last_intake_cmd = final_intake_power
+        self._last_roller_cmd = final_roller_power
