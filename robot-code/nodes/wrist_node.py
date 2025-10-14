@@ -248,7 +248,7 @@ class WristNode(BaseNode):
 
         """
         pulse = self._power_to_pulse(power)
-        roller_power = self._clamp(roller_power, 0.5, 1.0)
+        roller_power = self._clamp(roller_power, -1.0, 1.0)
         roller_pulse = self._power_to_pulse(roller_power)
         self._set_servo(self.intake_esc_left, pulse)
         self._set_servo(self.intake_esc_right, pulse)
