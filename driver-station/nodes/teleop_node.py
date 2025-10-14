@@ -62,7 +62,7 @@ class TeleopNode(BaseNode):
         self.max_angular_speed = 1.0  # rad/s
         self.deadzone = 0.05
         self.field_relative = True  # Convert joystick to field-relative driving
-        self.CLAW_OFFSET_ANGLE = np.deg2rad(-22.0)
+        self.CLAW_OFFSET_ANGLE = np.deg2rad(-7.0)
 
         # Target pose UI (for Go-To node)
         self.target_pose = np.array([0.0, 0.0, 0.0])  # x, y, theta
@@ -194,6 +194,7 @@ class TeleopNode(BaseNode):
             'STOW':        STOW,
             'PLACE_HEAD':  np.array([UP + np.deg2rad(0.0), UP + np.deg2rad(30.0)], dtype=float),
             'PLACE_HEAD_WRIST_TRAVEL': np.array([UP + np.deg2rad(0.0), np.deg2rad(200.0)], dtype=float),
+            'PLACE_HEAD_FROM_LEGAL_START_TRAVEL': np.array([UP - np.deg2rad(90), UP + np.deg2rad(0.0)], dtype=float),
             'PLACE_SIDE':  np.array([UP + np.deg2rad(-10.0), UP + np.deg2rad(10.0)], dtype=float),
             'PLACE_SIDE_WRIST_TRAVEL': np.array([UP, np.deg2rad(230.0)], dtype=float),
             'RELEASE':     np.array([UP + np.deg2rad(15.0), np.deg2rad(190.0)], dtype=float),
@@ -696,7 +697,7 @@ class TeleopNode(BaseNode):
         self.arm_target[:] = pose
         # Use non-zero end velocity on travel waypoints to smooth transitions
         # Include RELEASE so it can flow-through to GROUND_IN_PARALLEL automatically
-        if self._arm_state in ("PLACE_HEAD_WRIST_TRAVEL", "PLACE_SIDE_WRIST_TRAVEL", "RELEASE"):
+        if self._arm_state in ("PLACE_HEAD_WRIST_TRAVEL", "PLACE_SIDE_WRIST_TRAVEL", "RELEASE", "PLACE_HEAD_FROM_LEGAL_START_TRAVEL"):
             evf = self.arm_intermediate_end_velocity_frac
         else:
             evf = 0.0
@@ -787,14 +788,14 @@ class TeleopNode(BaseNode):
                 self._arm_state = 'SILO_IN'; transitioned = True
             elif pressed('cross'):
                 self._arm_state = 'GROUND_IN_PARALLEL'; transitioned = True
-        elif s == 'PLACE_HEAD_WRIST_TRAVEL' or s == 'PLACE_SIDE_WRIST_TRAVEL':
+        elif s == 'PLACE_HEAD_WRIST_TRAVEL' or s == 'PLACE_SIDE_WRIST_TRAVEL' or s == 'PLACE_HEAD_FROM_LEGAL_START_TRAVEL':
             # Prefer crossing-based transition; use 3s timer as obvious fallback
             if self._arm_crossed_intermediate():
                 self.logger.info("Arm crossed intermediate target; advancing to PLACE state")
-                self._arm_state = 'PLACE_HEAD' if s == 'PLACE_HEAD_WRIST_TRAVEL' else 'PLACE_SIDE'; transitioned = True; self._clear_intermediate_monitor()
+                self._arm_state = 'PLACE_HEAD' if s == 'PLACE_HEAD_WRIST_TRAVEL' or s == 'PLACE_HEAD_FROM_LEGAL_START_TRAVEL' else 'PLACE_SIDE'; transitioned = True; self._clear_intermediate_monitor()
             elif self._wrist_travel_timer.elapsed():
                 self.logger.warning("Fallback: wrist travel timer elapsed (3s); advancing state")
-                self._arm_state = 'PLACE_HEAD' if s == 'PLACE_HEAD_WRIST_TRAVEL' else 'PLACE_SIDE'; transitioned = True; self._clear_intermediate_monitor()
+                self._arm_state = 'PLACE_HEAD' if s == 'PLACE_HEAD_WRIST_TRAVEL' or s == 'PLACE_HEAD_FROM_LEGAL_START_TRAVEL' else 'PLACE_SIDE'; transitioned = True; self._clear_intermediate_monitor()
         elif s in ('PLACE_HEAD', 'PLACE_SIDE'):
             if pressed('circle'):
                 if self._arm_state == 'PLACE_HEAD':
@@ -836,6 +837,8 @@ class TeleopNode(BaseNode):
             if self._legal_start_intermediate_state_timer_2.elapsed():
                 self._arm_state = 'STOW'; transitioned = True; self._clear_intermediate_monitor()
         elif s == 'LEGAL_START':
+            if pressed('triangle'):
+                self._arm_state = 'PLACE_HEAD_FROM_LEGAL_START_TRAVEL'; transitioned = True; self._wrist_travel_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
             if pressed('circle'):
                 self._arm_state = 'EXIT_LEGAL_START_INTERMEDIATE_STATE'; transitioned = True; self._legal_start_intermediate_state_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
         elif s == 'SILO_PULL_OUT':
@@ -864,10 +867,11 @@ class TeleopNode(BaseNode):
 
     def _handle_triggers(self, btn: dict):
         # Thresholding with edge detection
-        l2 = float(btn.get('l2', 0.0)) * 0.35
-        r2 = float(btn.get('r2', 0.0)) * 0.35
-        if self._arm_state == 'GROUND_IN_PARALLEL':
-            r2 = 0.11
+        l2 = float(btn.get('l2', 0.0)) * 0.60
+        r2 = float(btn.get('r2', 0.0)) * 0.60
+        intake_power = 0.11
+        if self._arm_state == 'GROUND_IN_PARALLEL' and self._claw_state == CLAW_OPEN and r2 < intake_power:
+            r2 = intake_power
         l2_now = l2 > 0.5
         r2_now = r2 > 0.5
         self._publish_intake_power(r2)

@@ -10,7 +10,7 @@ nodes:
       max_linear_speed: 1.9  # Maximum linear velocity (m/s)
       max_angular_speed: 2.0  # Maximum angular velocity (rad/s)
       deadzone: 0.05  # Controller deadzone
-      field_relative: true  # Use odometry to drive in field frame
+      field_relative: false  # Use odometry to drive in field frame
       indicator_color: "red"
       arm_joint_offsets_deg:
         shoulder: 0.0
