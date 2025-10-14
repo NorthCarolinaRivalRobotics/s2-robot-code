@@ -369,6 +369,7 @@ class WristNode(BaseNode):
                 new_power = self._clamp(current_power + limited_delta, -1.0, 1.0)
                 if abs(new_power - current_power) > 1e-4:
                     self._state.intake_power = new_power
+                    self._state.roller_power = new_power
                     self._apply_intake_power(new_power, new_power)
         self._last_intake_update_ts = now
         if self._state.busy and now >= self._state.eta_ts:
