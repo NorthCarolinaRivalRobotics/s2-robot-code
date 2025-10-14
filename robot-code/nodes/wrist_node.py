@@ -173,7 +173,9 @@ class WristNode(BaseNode):
         # time.sleep(1.0)
         self._ramp_intake_power(0.0, 0.0, 1.0)
         self._ramp_intake_power(1.0, 1.0, 1.0)
+        self._ramp_intake_power(0.0, 0.0, 1.0)
         self._ramp_intake_power(0.0, 0.5, 1.0)
+
         self._intake_target = self._state.intake_power
 
     # --- Helpers ---
