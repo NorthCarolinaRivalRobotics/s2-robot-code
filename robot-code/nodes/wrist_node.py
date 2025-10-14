@@ -173,9 +173,7 @@ class WristNode(BaseNode):
         # time.sleep(1.0)
         self._ramp_intake_power(0.0, 0.0, 1.0)
         self._ramp_intake_power(1.0, 1.0, 1.0)
-        self._ramp_intake_power(0.0, 0.0, 1.0)
         self._ramp_intake_power(0.0, 0.5, 1.0)
-
         self._intake_target = self._state.intake_power
 
     # --- Helpers ---
@@ -240,15 +238,8 @@ class WristNode(BaseNode):
         return int(self._clamp(pulse, self.esc_min, self.esc_max))
 
     def _apply_intake_power(self, power: float, roller_power: float) -> None:
-        """
-        intake_range: 0 - 1
-        roller_range -1 to 1, 
-        we want to run the roller from 0.5 to 1 
-        mapping 0-1 -> 0.5-1
-
-        """
         pulse = self._power_to_pulse(power)
-        roller_power = self._clamp(roller_power, -1.0, 1.0)
+
         roller_pulse = self._power_to_pulse(roller_power)
         self._set_servo(self.intake_esc_left, pulse)
         self._set_servo(self.intake_esc_right, pulse)
