@@ -52,7 +52,6 @@ class WristState:
     busy: bool = False
     eta_ts: float = 0.0
     intake_power: float = 0.0
-    roller_power: float = 0.0
     indicator_color: str = ""
 
 
@@ -171,11 +170,9 @@ class WristNode(BaseNode):
         # time.sleep(1.0)
         # self._apply_intake_power(0.0)
         # time.sleep(1.0)
-        self._ramp_intake_power(0.0, 0.0, 1.0)
-        self._ramp_intake_power(1.0, 1.0, 1.0)
-        self._ramp_intake_power(0.0, 0.0, 1.0)
-        self._ramp_intake_power(0.0, 0.5, 1.0)
-
+        self._ramp_intake_power(0.0, 1.0)
+        self._ramp_intake_power(1.0, 1.0)
+        self._ramp_intake_power(0.0, 1.0)
         self._intake_target = self._state.intake_power
 
     # --- Helpers ---
@@ -239,13 +236,11 @@ class WristNode(BaseNode):
             pulse = self.esc_neutral + int(round(clamped * lo_span))
         return int(self._clamp(pulse, self.esc_min, self.esc_max))
 
-    def _apply_intake_power(self, power: float, roller_power: float) -> None:
+    def _apply_intake_power(self, power: float) -> None:
         pulse = self._power_to_pulse(power)
-
-        roller_pulse = self._power_to_pulse(roller_power)
         self._set_servo(self.intake_esc_left, pulse)
         self._set_servo(self.intake_esc_right, pulse)
-        self._set_servo(self.roller_esc, roller_pulse)
+        self._set_servo(self.roller_esc, pulse)
         logger.debug(f"Intake power {power:.2f} -> pulse {pulse}")
 
     def _set_indicator_color(self, color: str) -> None:
@@ -371,7 +366,7 @@ class WristNode(BaseNode):
                 new_power = self._clamp(current_power + limited_delta, -1.0, 1.0)
                 if abs(new_power - current_power) > 1e-4:
                     self._state.intake_power = new_power
-                    self._apply_intake_power(new_power, new_power)
+                    self._apply_intake_power(new_power)
         self._last_intake_update_ts = now
         if self._state.busy and now >= self._state.eta_ts:
             self._state.busy = False
@@ -389,13 +384,9 @@ class WristNode(BaseNode):
         super().cleanup()
 
 
-    def _ramp_intake_power(self, power: float, roller_power: float, duration: float) -> None:
+    def _ramp_intake_power(self, power: float, duration: float) -> None:
         start_power = self._state.intake_power
-        start_roller_power = self._state.roller_power
         end_power = power
-        end_roller_power = roller_power
-        final_power = self._clamp(end_power, -1.0, 1.0)
-        final_roller_power = self._clamp(end_roller_power, -1.0, 1.0)
         start_time = time.time()
         end_time = start_time + duration
         while time.time() < end_time:
@@ -403,15 +394,13 @@ class WristNode(BaseNode):
             t = (now - start_time) / max(duration, 1e-6)
             current_power = start_power + t * (end_power - start_power)
             current_power = self._clamp(current_power, -1.0, 1.0)
-            current_roller_power = start_roller_power + t * (end_roller_power - start_roller_power)
-            current_roller_power = self._clamp(current_roller_power, -1.0, 1.0)
             self._state.intake_power = current_power
-            self._apply_intake_power(current_power, current_roller_power)
+            self._apply_intake_power(current_power)
             self._last_intake_update_ts = now
             time.sleep(0.01)
         final_power = self._clamp(end_power, -1.0, 1.0)
         self._state.intake_power = final_power
-        self._apply_intake_power(final_power, final_roller_power)
+        self._apply_intake_power(final_power)
         self._last_intake_update_ts = time.time()
         self._intake_target = final_power
         self._last_intake_cmd = final_power
