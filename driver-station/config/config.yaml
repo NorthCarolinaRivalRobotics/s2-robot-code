@@ -11,7 +11,7 @@ nodes:
       max_angular_speed: 2.0  # Maximum angular velocity (rad/s)
       deadzone: 0.05  # Controller deadzone
       field_relative: false  # Use odometry to drive in field frame
-      indicator_color: "red"
+      indicator_color: "blue"
       arm_joint_offsets_deg:
         shoulder: 0.0
         elbow: 0.0
@@ -69,3 +69,21 @@ nodes:
       imu_quat_topic: "/cash/sensor/imu/quat"
       power_topic: "/cash/state/power/dist"
       integrate_twist_if_needed: false
+
+  # Battery alarm node - speaks alerts for low voltage/current events
+  - type: nodes.battery_alarm.BatteryAlarmNode
+    params:
+      robot_id: "cash"
+      update_rate: 5.0
+      power_topic: "/cash/state/power/dist"
+      low_voltage_threshold: 21.0
+      high_current_threshold: 22.0
+      alert_cooldown_s: 30.0
+      teleop_topic: "/cash/cmd/teleop"
+      match_timer_enabled: true
+      match_duration_s: 150.0
+      match_announce_interval_s: 10.0
+      motion_speed_threshold: 0.1
+      match_special_callouts:
+        25: "Ensure all available nukes are scored."
+        10: "Go balance."

@@ -64,7 +64,7 @@ class TeleopNode(BaseNode):
         self.deadzone = 0.05
         self.field_relative = True  # Convert joystick to field-relative driving
         self.CLAW_OFFSET_ANGLE = np.deg2rad(-7.0)
-        self.ROLLER_POWER = 0.25
+        self.ROLLER_POWER = 0.35
 
         # Target pose UI (for Go-To node)
         self.target_pose = np.array([0.0, 0.0, 0.0])  # x, y, theta
@@ -106,6 +106,7 @@ class TeleopNode(BaseNode):
         self.roller_speed_topic = robot_topic(self.robot_id, "cmd/wrist/roller_speed")
         self.indicator_color_topic = robot_topic(self.robot_id, "cmd/wrist/light_color")
         self.heading_zero_topic = robot_topic(self.robot_id, "cmd/odometry/rezero_yaw")
+        self.arm_state_topic = robot_topic(self.robot_id, "state/arm/state")
         # Go-To control events
         self.goto_start_topic = robot_topic(self.robot_id, "ui/goto/start")
         self.goto_cancel_topic = robot_topic(self.robot_id, "ui/goto/cancel")
@@ -176,6 +177,7 @@ class TeleopNode(BaseNode):
         # Intermediate crossing detection state
         self._intermediate_target: np.ndarray | None = None
         self._intermediate_prev_err: tuple[float, float] | None = None
+        self._silo_in_auto_claw_done = False
         # Named poses (placeholders; will be tuned later) shoulder, elbow
         # arm straight out is (0.0, pi)
         UP = np.pi/2.0
@@ -183,12 +185,13 @@ class TeleopNode(BaseNode):
         PULL_OUT_ANGLE_OFFSET = 25.0
         SILO_IN = np.array([UP - np.deg2rad(18.0), np.deg2rad(263.0)], dtype=float)
         SILO_PULL_OUT = np.array([UP - np.deg2rad(25.0), np.deg2rad(275.0)], dtype=float)
-        STOW = np.array([UP - np.deg2rad(10.0) - np.deg2rad(25), np.deg2rad(263.0) + np.deg2rad(20)], dtype=float)
+        STOW = np.array([UP - np.deg2rad(10.0) - np.deg2rad(25), np.deg2rad(263.0) + np.deg2rad(16)], dtype=float)
 
         self.angle_pid = AnglePID(kp=1.5, ki=0.00, kd=0.00)
 
         # Track last published arm command to reapply after offset updates
         self._last_arm_command: dict | None = None
+        self._last_published_arm_state: str | None = None
 
         self._pose_map = {
             "LEGAL_START": np.array([np.deg2rad(-105), UP + np.deg2rad(45.0)], dtype=float),
@@ -197,6 +200,7 @@ class TeleopNode(BaseNode):
             "EXIT_LEGAL_START_INTERMEDIATE_STATE_2": np.array([UP + np.deg2rad(12.0), np.deg2rad(250.0)], dtype=float),
             "UP": np.array([UP, UP], dtype=float),
             'STOW':        STOW,
+            'PLACE_HIGH_TO_GROUND_TRANSITION': np.array([UP + np.deg2rad(30.0), np.deg2rad(210.0)], dtype=float),
             'PLACE_HEAD':  np.array([UP + np.deg2rad(0.0), UP + np.deg2rad(30.0)], dtype=float),
             'PLACE_HEAD_WRIST_TRAVEL': np.array([UP + np.deg2rad(0.0), np.deg2rad(200.0)], dtype=float),
             'PLACE_HEAD_FROM_LEGAL_START_TRAVEL': np.array([UP - np.deg2rad(90), UP + np.deg2rad(0.0)], dtype=float),
@@ -204,6 +208,8 @@ class TeleopNode(BaseNode):
             'PLACE_SIDE_WRIST_TRAVEL': np.array([UP, np.deg2rad(230.0)], dtype=float),
             'RELEASE':     np.array([UP + np.deg2rad(15.0), np.deg2rad(190.0)], dtype=float),
             'GROUND_IN_PARALLEL':     np.array([UP - np.deg2rad(55.0), np.deg2rad(284.0)], dtype=float),
+            'GROUND_IN_MAXIMUM_OUT':     np.array([UP - np.deg2rad(62.0), np.deg2rad(281.0)], dtype=float),
+
             'SILO_IN':   SILO_IN,
             'SILO_PULL_OUT': SILO_PULL_OUT,
         }
@@ -214,12 +220,14 @@ class TeleopNode(BaseNode):
             'EXIT_LEGAL_START_INTERMEDIATE_STATE_2': np.deg2rad(90 + 100.0),
             'UP': np.pi/2.0,
             'STOW': np.deg2rad(90 + 35.0),
+            'PLACE_HIGH_TO_GROUND_TRANSITION': np.deg2rad(90 + 90.0),
             'PLACE_HEAD': np.pi/2.0 + np.deg2rad(-30.0),
             'PLACE_HEAD_WRIST_TRAVEL': np.pi,
             'PLACE_SIDE': np.deg2rad(90 - 65.0),
             'PLACE_SIDE_WRIST_TRAVEL': np.pi,
             'RELEASE': np.pi,
-            'GROUND_IN_PARALLEL': np.deg2rad(90 + 50.0),
+            'GROUND_IN_PARALLEL': np.deg2rad(90 + 57.0),
+            'GROUND_IN_MAXIMUM_OUT': np.deg2rad(90 + 55.0),
             'SILO_IN': np.deg2rad(90 + 65.0),
             'SILO_PULL_OUT': np.deg2rad(90 + 45.0),
         }
@@ -256,6 +264,7 @@ class TeleopNode(BaseNode):
         self.logger.info(f"  Arm cmd topic: {self.arm_cmd_topic}")
 
         self.is_first_arm_update = True
+        self._maybe_publish_arm_state(self._arm_state, force=True)
 
     def _load_initial_arm_offsets(self, cfg: dict) -> None:
         raw_offsets = cfg.get("arm_joint_offsets_rad")
@@ -677,6 +686,22 @@ class TeleopNode(BaseNode):
     def set_indicator_light_color(self, color: str, *, log: bool = False, force: bool = False) -> None:
         self._publish_indicator_color(color, log=log, force=force)
 
+    def _publish_arm_state(self, state: str) -> None:
+        payload = {
+            "state": state,
+            "timestamp_s": time.time(),
+        }
+        try:
+            self.put(self.arm_state_topic, payload)
+        except Exception as e:
+            self.logger.debug(f"Failed to publish arm state '{state}': {e}")
+
+    def _maybe_publish_arm_state(self, state: str, *, force: bool = False) -> None:
+        if not force and self._last_published_arm_state == state:
+            return
+        self._last_published_arm_state = state
+        self._publish_arm_state(state)
+
     def _zero_robot_heading(self) -> None:
         """Publish a command to rezero the robot heading."""
         try:
@@ -694,6 +719,19 @@ class TeleopNode(BaseNode):
         self._claw_state = state
         self._publish_claw_state(state, log=log)
 
+    def _maybe_auto_set_silo_claw(self, now: float) -> None:
+        if self._arm_state != 'SILO_IN':
+            return
+        if self._silo_in_auto_claw_done:
+            return
+        if (now - self._last_transition_ts) < 0.1:
+            return
+        if self._claw_state == CLAW_SPEAR:
+            self._silo_in_auto_claw_done = True
+            return
+        self._silo_in_auto_claw_done = True
+        self._set_claw_state(CLAW_SPEAR)
+
     def _apply_arm_state(self):
         pose = self._pose_map.get(self._arm_state, np.array([0.0, 0.0], dtype=float))
         wrist = float(self._wrist_angle_map.get(self._arm_state, 0.0))
@@ -710,6 +748,7 @@ class TeleopNode(BaseNode):
         color = self._arm_indicator_color_map.get(self._arm_state)
         if color:
             self._publish_indicator_color(color)
+        self._maybe_publish_arm_state(self._arm_state)
 
     def _begin_intermediate_monitor(self, state_name: str):
         """Initialize crossing detection for an intermediate waypoint state."""
@@ -768,7 +807,8 @@ class TeleopNode(BaseNode):
 
         # Debounce window
         if (now - self._last_transition_ts) < self._debounce_s:
-            self._btn_prev = {k: bool(btn.get(k, False)) for k in ('square','cross','circle','triangle')}
+            self._maybe_auto_set_silo_claw(now)
+            self._btn_prev = {k: bool(btn.get(k, False)) for k in ('square','cross','circle','triangle','l1','left_bumper')}
             # Still handle triggers in parallel even if debouncing buttons
             self._handle_triggers(btn)
             return
@@ -805,6 +845,11 @@ class TeleopNode(BaseNode):
                     self._arm_state = 'RELEASE'; transitioned = True; self._wrist_travel_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
                 else:
                     self._arm_state = 'PLACE_HEAD'; transitioned = True; self._wrist_travel_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
+            elif pressed('cross'):
+                self._arm_state = 'PLACE_HIGH_TO_GROUND_TRANSITION'; transitioned = True; self._wrist_travel_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
+        elif s == 'PLACE_HIGH_TO_GROUND_TRANSITION':
+            if self._wrist_travel_timer.elapsed():
+                self._arm_state = 'GROUND_IN_PARALLEL'; transitioned = True; self._clear_intermediate_monitor()
         elif s == 'RELEASE':
             # Prefer crossing-based transition; use timer as fallback; allow manual advance on Cross
             if self._arm_crossed_intermediate():
@@ -816,12 +861,22 @@ class TeleopNode(BaseNode):
             elif pressed('cross'):
                 self._arm_state = 'STOW'; transitioned = True; self._clear_intermediate_monitor()
         elif s == 'GROUND_IN_PARALLEL':
-            if pressed('circle'):
+            l1_toggle = pressed('l1') or pressed('left_bumper')
+            if l1_toggle:
+                self._arm_state = 'GROUND_IN_MAXIMUM_OUT'; transitioned = True
+            elif pressed('circle'):
                 self._arm_state = 'SILO_IN'; transitioned = True
             elif pressed('cross'):
                 self._arm_state = 'STOW'; transitioned = True
             elif pressed('triangle'):
                 self._arm_state = 'PLACE_HEAD_WRIST_TRAVEL'; transitioned = True; self._wrist_travel_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
+
+        elif s == 'GROUND_IN_MAXIMUM_OUT':
+            l1_toggle = pressed('l1') or pressed('left_bumper')
+            if l1_toggle:
+                self._arm_state = 'GROUND_IN_PARALLEL'; transitioned = True
+            elif pressed('cross'):
+                self._arm_state = 'STOW'; transitioned = True
 
         elif s == 'SILO_IN':
             if pressed('circle'):
@@ -829,7 +884,7 @@ class TeleopNode(BaseNode):
             elif pressed('cross'):
                 self._arm_state = 'STOW'; transitioned = True; self._wrist_travel_timer.reset()
             elif pressed('triangle'):
-                self._arm_state = 'PLACE_SIDE_WRIST_TRAVEL'; transitioned = True; self._pull_out_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
+                self._arm_state = 'PLACE_HEAD_WRIST_TRAVEL'; transitioned = True; self._pull_out_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
         elif s == 'UP':
             if pressed('direction_down'):
                 self._arm_state = 'LEGAL_START'; transitioned = True
@@ -861,23 +916,26 @@ class TeleopNode(BaseNode):
             self._last_transition_ts = now
             if self._arm_state == 'STOW':
                 self._set_claw_state(CLAW_CLOSED)
+            self._silo_in_auto_claw_done = self._arm_state != 'SILO_IN'
+        self._maybe_auto_set_silo_claw(now)
         self._apply_arm_state()
 
         # Save for edge detection next time
-        self._btn_prev = {k: bool(btn.get(k, False)) for k in ('square','cross','circle','triangle')}
+        self._btn_prev = {k: bool(btn.get(k, False)) for k in ('square','cross','circle','triangle','l1','left_bumper')}
         # Also handle triggers (GoTo) each cycle
         self._handle_triggers(btn)
 
     def _handle_triggers(self, btn: dict):
         # Thresholding with edge detection
-        l2 = float(btn.get('l2', 0.0)) * 0.60
+        l2 = float(btn.get('l2', 0.0)) * 0.35
         r2 = float(btn.get('r2', 0.0)) * 0.60
         intake_power = 0.11
-        if self._arm_state == 'GROUND_IN_PARALLEL' and self._claw_state == CLAW_OPEN and r2 < intake_power:
+        if (self._arm_state == 'GROUND_IN_PARALLEL' or self._arm_state == 'GROUND_IN_MAXIMUM_OUT') and self._claw_state == CLAW_OPEN and r2 < intake_power:
             r2 = intake_power
         l2_now = l2 > 0.5
         r2_now = r2 > 0.5
         self._publish_intake_power(r2)
+        self._publish_roller_power(l2)
         # if l2_now and not self._l2_active:
         #     # SILO position (placeholder zeros)
         #     try:
@@ -954,9 +1012,6 @@ class TeleopNode(BaseNode):
             # Read controller inputs
             inputs = self._read_controller_inputs()
             buttons = self._read_buttons()
-            square_active = bool(buttons.get('square')) if buttons else False
-            roller_command = self.ROLLER_POWER if square_active else 0.0
-            self._publish_roller_power(roller_command)
             
             # Get twist commands from controller (joystick frame)
             linear_x = inputs['linear_x']
@@ -979,7 +1034,9 @@ class TeleopNode(BaseNode):
                 rb_now = bool(btn.get('right_bumper', False))
                 lb_now = bool(btn.get('left_bumper', False))
                 if rb_now and not self._rb_prev:
-                    if self._claw_state == CLAW_SPEAR:
+                    if self._arm_state == "PLACE_HEAD" or self._arm_state == "SILO_IN" and self._claw_state == CLAW_CLOSED:
+                        target = CLAW_SPEAR
+                    elif self._claw_state == CLAW_SPEAR:
                         target = CLAW_CLOSED
                     elif self._claw_state == CLAW_OPEN:
                         target = CLAW_CLOSED
