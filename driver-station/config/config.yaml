@@ -7,10 +7,23 @@ nodes:
     params:
       robot_id: "cash"
       update_rate: 30.0  # Hz
-      max_linear_speed: 3.0  # Maximum linear velocity (m/s)
+      max_linear_speed: 1.9  # Maximum linear velocity (m/s)
       max_angular_speed: 2.0  # Maximum angular velocity (rad/s)
       deadzone: 0.05  # Controller deadzone
-      field_relative: true  # Use odometry to drive in field frame
+      field_relative: false  # Use odometry to drive in field frame
+      indicator_color: "blue"
+      arm_joint_offsets_deg:
+        shoulder: 0.0
+        elbow: 0.0
+
+  # Arm offset adjustment UI
+  - type: nodes.arm_offset_ui_node.ArmOffsetUINode
+    params:
+      robot_id: "cash"
+      update_rate: 20.0
+      arm_joint_offsets_deg:
+        shoulder: 0.0
+        elbow: 0.0
 
   # Go-To-Position controller node (publishes autonomy twist)
   - type: nodes.goto_node.GoToPositionNode
@@ -54,4 +67,23 @@ nodes:
       odom_topic: "/cash/state/pose2d"
       twist_topic: "/cash/state/twist"
       imu_quat_topic: "/cash/sensor/imu/quat"
+      power_topic: "/cash/state/power/dist"
       integrate_twist_if_needed: false
+
+  # Battery alarm node - speaks alerts for low voltage/current events
+  - type: nodes.battery_alarm.BatteryAlarmNode
+    params:
+      robot_id: "cash"
+      update_rate: 5.0
+      power_topic: "/cash/state/power/dist"
+      low_voltage_threshold: 21.0
+      high_current_threshold: 22.0
+      alert_cooldown_s: 30.0
+      teleop_topic: "/cash/cmd/teleop"
+      match_timer_enabled: true
+      match_duration_s: 150.0
+      match_announce_interval_s: 10.0
+      motion_speed_threshold: 0.1
+      match_special_callouts:
+        25: "Ensure all available nukes are scored."
+        10: "Go balance."

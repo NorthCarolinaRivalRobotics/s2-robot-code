@@ -9,13 +9,39 @@ import time
 import logging
 import math
 import numpy as np
+from tide.core.utils import add_project_root_to_path
+
+add_project_root_to_path(__file__)
+# Use the acceleration limiter from GoTo node
+
+from .goto_node import apply_acceleration_limit, Twist2dVelocity
 
 from tide.core.node import BaseNode
 from tide.namespaces import robot_topic
 from tide import CmdTopic
-from tide.models import Twist2D, Vector2, Pose2D
+from tide.models import Twist2D, Vector2, Vector3, Pose2D
 from tide.core.geometry import SE2, SO2
 from tide.models.serialization import to_zenoh_value
+
+
+CLAW_CLOSED = "CLOSED"
+CLAW_OPEN = "OPEN"
+CLAW_SPEAR = "SPEAR"
+_CLAW_STATES = {CLAW_CLOSED, CLAW_OPEN, CLAW_SPEAR}
+
+
+_INDICATOR_COLORS = {
+    "off",
+    "red",
+    "orange",
+    "yellow",
+    "sage",
+    "green",
+    "azure",
+    "blue",
+    "indigo",
+    "violet",
+}
 
 
 class TeleopNode(BaseNode):
@@ -37,6 +63,8 @@ class TeleopNode(BaseNode):
         self.max_angular_speed = 1.0  # rad/s
         self.deadzone = 0.05
         self.field_relative = True  # Convert joystick to field-relative driving
+        self.CLAW_OFFSET_ANGLE = np.deg2rad(-7.0)
+        self.ROLLER_POWER = 0.35
 
         # Target pose UI (for Go-To node)
         self.target_pose = np.array([0.0, 0.0, 0.0])  # x, y, theta
@@ -51,6 +79,12 @@ class TeleopNode(BaseNode):
             self.deadzone = config.get("deadzone", self.deadzone)
             self.field_relative = config.get("field_relative", self.field_relative)
             # No PD gains here; TeleopNode only handles manual control and UI
+            # Arm position proximity tolerance (radians) for state transitions
+            # If not provided, default to ~3 degrees.
+            self.arm_pos_tol_rad = float(config.get("arm_position_tolerance_rad", math.radians(3.0)))
+            self.ROLLER_POWER = config.get("roller_power", self.ROLLER_POWER)
+        else:
+            self.arm_pos_tol_rad = math.radians(3.0)
         
         # Set update rate
         self.hz = self.update_rate
@@ -60,9 +94,25 @@ class TeleopNode(BaseNode):
         self.twist_topic = robot_topic(self.robot_id, "cmd/teleop")
         self.odom_topic = robot_topic(self.robot_id, "state/pose2d")
         self.target_topic = robot_topic(self.robot_id, "ui/target_pose2d")
+        # Arm target topic (Vector2: x=shoulder revs, y=elbow revs)
+        # Use absolute topic to match the rest of the stack
+        self.arm_cmd_topic = robot_topic(self.robot_id, "cmd/arm/target")
+        # Arm state topic (Vector2: x=shoulder rad, y=elbow rad)
+        self.arm_pos_topic = robot_topic(self.robot_id, "state/arm/position")
+        # Wrist/claw command topics (native Tide nodes use full path)
+        self.wrist_angle_topic = robot_topic(self.robot_id, "cmd/wrist/angle")
+        self.claw_cmd_topic = robot_topic(self.robot_id, "cmd/wrist/claw")
+        self.intake_speed_topic = robot_topic(self.robot_id, "cmd/wrist/intake_speed")
+        self.roller_speed_topic = robot_topic(self.robot_id, "cmd/wrist/roller_speed")
+        self.indicator_color_topic = robot_topic(self.robot_id, "cmd/wrist/light_color")
+        self.heading_zero_topic = robot_topic(self.robot_id, "cmd/odometry/rezero_yaw")
+        self.arm_state_topic = robot_topic(self.robot_id, "state/arm/state")
         # Go-To control events
         self.goto_start_topic = robot_topic(self.robot_id, "ui/goto/start")
         self.goto_cancel_topic = robot_topic(self.robot_id, "ui/goto/cancel")
+
+        # Initialize logging early so helpers can use it
+        self.logger = logging.getLogger(f"Teleop_{self.robot_id}")
 
         # Odometry subscription for field-relative driving
         self.current_theta = 0.0
@@ -73,9 +123,17 @@ class TeleopNode(BaseNode):
         self._prev_pose = None
         self._prev_pose_ts = None
         self.subscribe(self.odom_topic, self._on_odometry)
-        
-        # Initialize logging
-        self.logger = logging.getLogger(f"Teleop_{self.robot_id}")
+        # Arm joint position subscription
+        self._arm_pos: tuple[float, float] | None = None  # corrected (shoulder_rad, elbow_rad)
+        self._arm_pos_raw: tuple[float, float] | None = None
+        self._arm_pos_ts: float | None = None
+        self.subscribe(self.arm_pos_topic, self._on_arm_position)
+
+        # Arm joint angle offsets (shoulder, elbow)
+        self._arm_angle_offsets = np.array([0.0, 0.0], dtype=float)
+        self.arm_offset_topic = robot_topic(self.robot_id, "cmd/arm/offsets")
+        self._load_initial_arm_offsets(config or {})
+        self.subscribe(self.arm_offset_topic, self._on_arm_offsets)
         
         # Initialize PS5 controller
         self._init_controller()
@@ -85,6 +143,102 @@ class TeleopNode(BaseNode):
         self._last_time = None
         # Teleop publish gating: only publish when inputs are active
         self._teleop_active = False
+        self._last_intake_power: float | None = None
+        self._last_roller_power: float | None = None
+        self.intake_power_deadband = float((config or {}).get("intake_power_deadband", 0.05))
+        self._indicator_color: str | None = None
+        raw_indicator_map = (config or {}).get("arm_indicator_color_map", {})
+        self._arm_indicator_color_cfg = raw_indicator_map if isinstance(raw_indicator_map, dict) else {}
+        self._arm_indicator_color_map: dict[str, str] = {}
+        self._startup_indicator_color = self._normalize_indicator_color((config or {}).get("indicator_color"))
+        self._initialize_indicator_color_map()
+        
+        # Arm control state (driver station side - manual increments)
+        self.arm_target = np.array([0.0, 0.0], dtype=float)  # [shoulder, elbow] in joint revs
+        self.arm_step = (config or {}).get('arm_step', 0.02)  # revs per tick
+        self.arm_repeat_interval = (config or {}).get('arm_repeat_interval', 0.3)  # seconds
+        self._arm_last_hat = (0, 0)
+        self._arm_last_emit = 0.0
+        # Arm intermediate end-velocity fraction (0..1) used for travel waypoints
+        self.arm_intermediate_end_velocity_frac = float((config or {}).get('arm_intermediate_end_velocity_frac', -0.1))
+
+        # Arm state machine
+        self._arm_state = 'LEGAL_START'  # INIT -> STOW immediately at start
+        self._last_transition_ts = 0.0
+        self._debounce_s = float((config or {}).get('arm_button_debounce_s', 0.2))
+        self._btn_prev: dict[str, bool] = {}
+
+        # Intermediate travel fallback timer (position-based transition preferred)
+        # Increase to 3.0s so that a fallback is obvious if it triggers.
+        self._wrist_travel_timer = ElapsedTimer(0.35)
+        self._pull_out_timer = ElapsedTimer(1.0)
+        self._legal_start_intermediate_state_timer = ElapsedTimer(0.25)
+        self._legal_start_intermediate_state_timer_2 = ElapsedTimer(0.25)
+        # Intermediate crossing detection state
+        self._intermediate_target: np.ndarray | None = None
+        self._intermediate_prev_err: tuple[float, float] | None = None
+        self._silo_in_auto_claw_done = False
+        # Named poses (placeholders; will be tuned later) shoulder, elbow
+        # arm straight out is (0.0, pi)
+        UP = np.pi/2.0
+
+        PULL_OUT_ANGLE_OFFSET = 25.0
+        SILO_IN = np.array([UP - np.deg2rad(18.0), np.deg2rad(263.0)], dtype=float)
+        SILO_PULL_OUT = np.array([UP - np.deg2rad(25.0), np.deg2rad(275.0)], dtype=float)
+        STOW = np.array([UP - np.deg2rad(10.0) - np.deg2rad(25), np.deg2rad(263.0) + np.deg2rad(16)], dtype=float)
+
+        self.angle_pid = AnglePID(kp=1.5, ki=0.00, kd=0.00)
+
+        # Track last published arm command to reapply after offset updates
+        self._last_arm_command: dict | None = None
+        self._last_published_arm_state: str | None = None
+
+        self._pose_map = {
+            "LEGAL_START": np.array([np.deg2rad(-105), UP + np.deg2rad(45.0)], dtype=float),
+            "UNFLIP": np.array([UP + np.deg2rad(75.0), np.deg2rad(160.0)], dtype=float),
+            "EXIT_LEGAL_START_INTERMEDIATE_STATE": np.array([UP + np.deg2rad(6.0), UP + np.deg2rad(0.0)], dtype=float),
+            "EXIT_LEGAL_START_INTERMEDIATE_STATE_2": np.array([UP + np.deg2rad(12.0), np.deg2rad(250.0)], dtype=float),
+            "UP": np.array([UP, UP], dtype=float),
+            'STOW':        STOW,
+            'PLACE_HIGH_TO_GROUND_TRANSITION': np.array([UP + np.deg2rad(30.0), np.deg2rad(210.0)], dtype=float),
+            'PLACE_HEAD':  np.array([UP + np.deg2rad(0.0), UP + np.deg2rad(30.0)], dtype=float),
+            'PLACE_HEAD_WRIST_TRAVEL': np.array([UP + np.deg2rad(0.0), np.deg2rad(200.0)], dtype=float),
+            'PLACE_HEAD_FROM_LEGAL_START_TRAVEL': np.array([UP - np.deg2rad(90), UP + np.deg2rad(0.0)], dtype=float),
+            'PLACE_SIDE':  np.array([UP + np.deg2rad(-10.0), UP + np.deg2rad(10.0)], dtype=float),
+            'PLACE_SIDE_WRIST_TRAVEL': np.array([UP, np.deg2rad(230.0)], dtype=float),
+            'RELEASE':     np.array([UP + np.deg2rad(15.0), np.deg2rad(190.0)], dtype=float),
+            'GROUND_IN_PARALLEL':     np.array([UP - np.deg2rad(55.0), np.deg2rad(284.0)], dtype=float),
+            'GROUND_IN_MAXIMUM_OUT':     np.array([UP - np.deg2rad(62.0), np.deg2rad(281.0)], dtype=float),
+
+            'SILO_IN':   SILO_IN,
+            'SILO_PULL_OUT': SILO_PULL_OUT,
+        }
+
+        self._wrist_angle_map = {
+            'LEGAL_START': np.deg2rad(90 + 100.0),
+            'EXIT_LEGAL_START_INTERMEDIATE_STATE': np.deg2rad(90 + 100.0),
+            'EXIT_LEGAL_START_INTERMEDIATE_STATE_2': np.deg2rad(90 + 100.0),
+            'UP': np.pi/2.0,
+            'STOW': np.deg2rad(90 + 35.0),
+            'PLACE_HIGH_TO_GROUND_TRANSITION': np.deg2rad(90 + 90.0),
+            'PLACE_HEAD': np.pi/2.0 + np.deg2rad(-30.0),
+            'PLACE_HEAD_WRIST_TRAVEL': np.pi,
+            'PLACE_SIDE': np.deg2rad(90 - 65.0),
+            'PLACE_SIDE_WRIST_TRAVEL': np.pi,
+            'RELEASE': np.pi,
+            'GROUND_IN_PARALLEL': np.deg2rad(90 + 57.0),
+            'GROUND_IN_MAXIMUM_OUT': np.deg2rad(90 + 55.0),
+            'SILO_IN': np.deg2rad(90 + 65.0),
+            'SILO_PULL_OUT': np.deg2rad(90 + 45.0),
+        }
+
+        # Claw state (decoupled from arm state machine)
+        self._claw_state = CLAW_CLOSED
+        self._rb_prev = False  # right bumper previous state for edge detection
+        self._lb_prev = False  # left bumper previous state for edge detection
+        # Trigger press latches
+        self._l2_active = False
+        self._r2_active = False
         
         self.logger.info(f"Teleop Node started for robot {self.robot_id}")
         self.logger.info("Controls:")
@@ -96,6 +250,118 @@ class TeleopNode(BaseNode):
         self.logger.info("  L1/R1: Rotate target heading")
         self.logger.info("  Square: Start go-to-position")
         self.logger.info("  Cross: Cancel go-to-position")
+        self.logger.info("Arm control:")
+        self.logger.info("  D-Pad Left/Right: Shoulder -/+ small step")
+        self.logger.info("  D-Pad Up/Down: Elbow +/− small step")
+        self.logger.info("  Triangle: Place (head-on)")
+        self.logger.info("  Square: Place (side)")
+        self.logger.info("  Left bumper: Zero robot heading")
+        self.logger.info("  Right bumper: Toggle claw open/close")
+        self.logger.info("  Circle: Toggle intakes")
+        self.logger.info("  Cross: Advance (open->silo) or Stow from intakes")
+        self.logger.info("  L2>0.5: GoTo SILO pose,  R2>0.5: GoTo GOAL pose")
+        self.logger.info(f"  Arm step: {self.arm_step:.3f} rev, repeat every {self.arm_repeat_interval:.2f}s")
+        self.logger.info(f"  Arm cmd topic: {self.arm_cmd_topic}")
+
+        self.is_first_arm_update = True
+        self._maybe_publish_arm_state(self._arm_state, force=True)
+
+    def _load_initial_arm_offsets(self, cfg: dict) -> None:
+        raw_offsets = cfg.get("arm_joint_offsets_rad")
+        if raw_offsets is None:
+            raw_offsets = cfg.get("arm_joint_offsets_deg")
+            if raw_offsets is not None:
+                parsed = self._parse_arm_offsets(raw_offsets)
+                if parsed is not None:
+                    self._arm_angle_offsets = np.deg2rad(parsed)
+                    return
+        parsed = self._parse_arm_offsets(raw_offsets)
+        if parsed is not None:
+            self._arm_angle_offsets = parsed
+
+    def _parse_arm_offsets(self, raw) -> np.ndarray | None:
+        if raw is None:
+            return None
+        try:
+            if isinstance(raw, dict):
+                shoulder = float(raw.get("shoulder", 0.0))
+                elbow = float(raw.get("elbow", 0.0))
+            elif isinstance(raw, (list, tuple)) and len(raw) >= 2:
+                shoulder = float(raw[0])
+                elbow = float(raw[1])
+            else:
+                return None
+            return np.array([shoulder, elbow], dtype=float)
+        except Exception:
+            self.logger.debug("Failed to parse arm offset config; using zeros")
+            return None
+
+    def _on_arm_position(self, sample):
+        """Handle arm joint position Vector2: x=shoulder rad, y=elbow rad."""
+        try:
+            print("case 2")
+            shoulder = float(sample["x"])  # type: ignore[index]
+            elbow = float(sample["y"])    # type: ignore[index]
+            self._arm_pos_raw = (shoulder, elbow)
+            corrected = self._apply_offsets_to_measurement(shoulder, elbow)
+            self._arm_pos = corrected
+            self._arm_pos_ts = time.time()
+        except Exception as e:
+            self.logger.debug(f"Failed to parse arm position: {e}")
+
+    def _apply_offsets_to_measurement(self, shoulder: float, elbow: float) -> tuple[float, float]:
+        corrected = np.array([shoulder, elbow], dtype=float) - self._arm_angle_offsets
+        return float(corrected[0]), float(corrected[1])
+
+    def _apply_offsets_to_command(self, shoulder: float, elbow: float) -> tuple[float, float]:
+        commanded = np.array([shoulder, elbow], dtype=float) + self._arm_angle_offsets
+        return float(commanded[0]), float(commanded[1])
+
+    def _reapply_arm_command(self) -> None:
+        if not self._last_arm_command:
+            return
+        cmd = self._last_arm_command
+        try:
+            if cmd.get("mode") == "manual":
+                self._publish_manual_arm_target(cmd["shoulder"], cmd["elbow"], cmd.get("end_velocity_frac", 0.0))
+            else:
+                self._arm_publish_targets(
+                    float(cmd["shoulder"]),
+                    float(cmd["elbow"]),
+                    float(cmd["wrist"]),
+                    str(cmd["claw_state"]),
+                    end_velocity_frac=float(cmd.get("end_velocity_frac", 0.0)),
+                )
+        except Exception as e:
+            self.logger.debug(f"Failed to reapply arm command after offset update: {e}")
+
+    def _on_arm_offsets(self, sample) -> None:
+        try:
+            if isinstance(sample, dict):
+                shoulder = float(sample.get("x") if "x" in sample else sample.get("shoulder", 0.0))
+                elbow = float(sample.get("y") if "y" in sample else sample.get("elbow", 0.0))
+            else:
+                shoulder = float(getattr(sample, "x", getattr(sample, "shoulder", 0.0)))
+                elbow = float(getattr(sample, "y", getattr(sample, "elbow", 0.0)))
+        except Exception:
+            self.logger.debug(f"Failed to parse arm offset message: {sample}")
+            return
+
+        new_offsets = np.array([shoulder, elbow], dtype=float)
+        if np.allclose(new_offsets, self._arm_angle_offsets):
+            return
+
+        self._arm_angle_offsets = new_offsets
+        self.logger.info(
+            f"Updated arm joint offsets (shoulder={self._arm_angle_offsets[0]:+.4f} rad, "
+            f"elbow={self._arm_angle_offsets[1]:+.4f} rad)"
+        )
+
+        if self._arm_pos_raw is not None:
+            corrected = self._apply_offsets_to_measurement(*self._arm_pos_raw)
+            self._arm_pos = corrected
+
+        self._reapply_arm_command()
 
     def _on_odometry(self, sample):
         """Update the latest robot yaw from odometry (radians)."""
@@ -197,15 +463,42 @@ class TeleopNode(BaseNode):
             pygame.event.pump()
             buttons = {i: self.joystick.get_button(i) for i in range(self.joystick.get_numbuttons())}
             hat = self.joystick.get_hat(0) if self.joystick.get_numhats() > 0 else (0, 0)
+            # Triggers as axes -> normalize from [-1,1] to [0,1]
+            l2 = 0.0
+            r2 = 0.0
+            try:
+                axes = self.joystick.get_numaxes()
+                # Common PS5 layouts put L2/R2 on axes 4/5 (or 3/4). Try safely.
+                if axes > 4:
+                    l2_raw = float(self.joystick.get_axis(4))
+                    r2_raw = float(self.joystick.get_axis(5))
+                elif axes > 3:
+                    l2_raw = float(self.joystick.get_axis(3))
+                    r2_raw = 0.0
+                else:
+                    l2_raw = 0.0
+                    r2_raw = 0.0
+                l2 = max(0.0, min(1.0, (l2_raw + 1.0) * 0.5))
+                r2 = max(0.0, min(1.0, (r2_raw + 1.0) * 0.5))
+            except Exception:
+                l2, r2 = 0.0, 0.0
             return {
-                'square': bool(buttons.get(0, 0)),
-                'cross': bool(buttons.get(1, 0)),
-                'circle': bool(buttons.get(2, 0)),
+                'square': bool(buttons.get(2, 0)),
+                'cross': bool(buttons.get(0, 0)),
+                'circle': bool(buttons.get(1, 0)),
                 'triangle': bool(buttons.get(3, 0)),
                 'l1': bool(buttons.get(4, 0)),
                 'r1': bool(buttons.get(5, 0)),
                 'hat_x': hat[0],
                 'hat_y': hat[1],
+                'l2': l2,
+                'r2': r2,
+                'direction_down': bool(buttons.get(12, 0)),
+                'direction_up': bool(buttons.get(11, 0)),
+                'direction_left': bool(buttons.get(13, 0)),
+                'direction_right': bool(buttons.get(14, 0)),
+                'left_bumper': bool(buttons.get(9, 0)),
+                'right_bumper': bool(buttons.get(10, 0)),
             }
         except Exception as e:
             self.logger.debug(f"Button read error: {e}")
@@ -247,20 +540,450 @@ class TeleopNode(BaseNode):
             self.target_pose[2] += rot_speed * dt
             self.has_target = True
         # Start/Cancel goto: publish UI events for GoToPositionNode
-        if btn.get('square') and self.has_target:
-            try:
-                self.put(self.goto_start_topic, to_zenoh_value(True))
-            except Exception as e:
-                self.logger.debug(f"Failed to publish goto start: {e}")
-        if btn.get('cross'):
-            try:
-                self.put(self.goto_cancel_topic, to_zenoh_value(True))
-            except Exception as e:
-                self.logger.debug(f"Failed to publish goto cancel: {e}")
+        # if btn.get('square') and self.has_target:
+        #     try:
+        #         self.put(self.goto_start_topic, to_zenoh_value(True))
+        #     except Exception as e:
+        #         self.logger.debug(f"Failed to publish goto start: {e}")
+        # if btn.get('cross'):
+        #     try:
+        #         self.put(self.goto_cancel_topic, to_zenoh_value(True))
+        #     except Exception as e:
+        #         self.logger.debug(f"Failed to publish goto cancel: {e}")
         # Always publish target if available
         self._publish_target()
 
     # TeleopNode no longer computes go-to twists; that logic moved to GoToPositionNode
+
+    def _update_arm_from_hat(self, now: float) -> None:
+        """Use D-pad to increment arm joint targets with debouncing and slow repeat."""
+        btn = self._read_buttons()
+        if not btn:
+            return
+        hat = (int(btn.get('hat_x', 0)), int(btn.get('hat_y', 0)))
+        # Reset debounce when hat released
+        if hat == (0, 0):
+            self._arm_last_hat = (0, 0)
+            # Debug: hat released
+            self.logger.debug("Arm D-pad: released (no command)")
+            return
+        # Emit on edge or at slow repeat interval
+        should_emit = False
+        if hat != self._arm_last_hat:
+            should_emit = True
+        elif (now - self._arm_last_emit) >= float(self.arm_repeat_interval):
+            should_emit = True
+        if not should_emit:
+            remaining = max(0.0, float(self.arm_repeat_interval) - (now - self._arm_last_emit))
+            self.logger.debug(f"Arm D-pad: debounced hat={hat}, next send in {remaining:.2f}s")
+            return
+        # Map hat to deltas: left/right -> shoulder, up/down -> elbow
+        d_shoulder = float(hat[0]) * self.arm_step  # right=+1, left=-1
+        d_elbow = float(hat[1]) * self.arm_step    # up=+1, down=-1
+        # Update and publish
+        self.arm_target[0] += d_shoulder
+        self.arm_target[1] += d_elbow
+        self._publish_manual_arm_target(float(self.arm_target[0]), float(self.arm_target[1]), 0.0)
+        self._arm_last_hat = hat
+        self._arm_last_emit = now
+
+    def _arm_publish_targets(self, shoulder: float, elbow: float, wrist_angle: float, claw_state: str, *, end_velocity_frac: float = 0.0):
+        # Arm joints
+        try:
+            cmd_shoulder, cmd_elbow = self._apply_offsets_to_command(shoulder, elbow)
+            # Publish desired end-velocity fraction in z for intermediate waypoints
+            self.put(
+                self.arm_cmd_topic,
+                to_zenoh_value(Vector3(x=float(cmd_shoulder), y=float(cmd_elbow), z=float(end_velocity_frac))),
+            )
+        except Exception as e:
+            self.logger.info(f"Failed to publish arm target: {e}")
+        # Wrist angle
+        try:
+            self.put(self.wrist_angle_topic, to_zenoh_value(float(wrist_angle + self.CLAW_OFFSET_ANGLE)))
+        except Exception as e:
+            self.logger.info(f"Failed to publish wrist angle: {e}")
+        # Claw command (driven elsewhere via toggle)
+        self._publish_claw_state(claw_state)
+        self._last_arm_command = {
+            "mode": "state",
+            "shoulder": float(shoulder),
+            "elbow": float(elbow),
+            "wrist": float(wrist_angle),
+            "claw_state": str(claw_state),
+            "end_velocity_frac": float(end_velocity_frac),
+        }
+
+    def _publish_manual_arm_target(self, shoulder: float, elbow: float, end_velocity_frac: float = 0.0) -> None:
+        try:
+            cmd_shoulder, cmd_elbow = self._apply_offsets_to_command(shoulder, elbow)
+            self.put(
+                self.arm_cmd_topic,
+                to_zenoh_value(Vector3(x=float(cmd_shoulder), y=float(cmd_elbow), z=float(end_velocity_frac))),
+            )
+            self._last_arm_command = {
+                "mode": "manual",
+                "shoulder": float(shoulder),
+                "elbow": float(elbow),
+                "end_velocity_frac": float(end_velocity_frac),
+            }
+        except Exception as e:
+            self.logger.debug(f"Failed to publish manual arm target: {e}")
+
+    def _publish_claw_state(self, state: str, *, log: bool = False) -> None:
+        if state not in _CLAW_STATES:
+            self.logger.debug(f"Ignoring unknown claw state '{state}'")
+            return
+        try:
+            self.put(self.claw_cmd_topic, to_zenoh_value(state))
+            if log:
+                self.logger.info(f"Claw set to {state}")
+        except Exception as e:
+            self.logger.info(f"Failed to publish claw state '{state}': {e}")
+
+    def _normalize_indicator_color(self, color) -> str | None:
+        if color is None:
+            return None
+        try:
+            text = str(color).strip().lower()
+        except Exception:
+            return None
+        if not text:
+            return None
+        if text in _INDICATOR_COLORS:
+            return text
+        return None
+
+    def _initialize_indicator_color_map(self) -> None:
+        self._arm_indicator_color_map.clear()
+        for state, raw_color in self._arm_indicator_color_cfg.items():
+            if not isinstance(state, str):
+                continue
+            color = self._normalize_indicator_color(raw_color)
+            if color is None and raw_color:
+                self.logger.debug(
+                    f"Ignoring indicator color '{raw_color}' for state '{state}'; not a known option"
+                )
+                continue
+            if color:
+                self._arm_indicator_color_map[state] = color
+
+    def _publish_indicator_color(self, color: str, *, log: bool = False, force: bool = False) -> None:
+        normalized = self._normalize_indicator_color(color)
+        if normalized is None:
+            self.logger.debug(f"Ignoring attempt to set indicator to unknown color '{color}'")
+            return
+        if not force and self._indicator_color == normalized:
+            return
+        try:
+            self.put(self.indicator_color_topic, to_zenoh_value(normalized))
+            self._indicator_color = normalized
+            if log:
+                self.logger.info(f"Indicator light set to {normalized}")
+        except Exception as e:
+            self.logger.info(f"Failed to publish indicator color '{normalized}': {e}")
+
+    def set_indicator_light_color(self, color: str, *, log: bool = False, force: bool = False) -> None:
+        self._publish_indicator_color(color, log=log, force=force)
+
+    def _publish_arm_state(self, state: str) -> None:
+        payload = {
+            "state": state,
+            "timestamp_s": time.time(),
+        }
+        try:
+            self.put(self.arm_state_topic, payload)
+        except Exception as e:
+            self.logger.debug(f"Failed to publish arm state '{state}': {e}")
+
+    def _maybe_publish_arm_state(self, state: str, *, force: bool = False) -> None:
+        if not force and self._last_published_arm_state == state:
+            return
+        self._last_published_arm_state = state
+        self._publish_arm_state(state)
+
+    def _zero_robot_heading(self) -> None:
+        """Publish a command to rezero the robot heading."""
+        try:
+            self.put(self.heading_zero_topic, to_zenoh_value(True))
+            self.logger.info("Heading rezero command sent")
+        except Exception as e:
+            self.logger.info(f"Failed to publish heading rezero command: {e}")
+
+    def _set_claw_state(self, state: str, *, log: bool = True) -> None:
+        if state not in _CLAW_STATES:
+            self.logger.debug(f"Ignoring attempt to set unknown claw state '{state}'")
+            return
+        if self._claw_state == state:
+            return
+        self._claw_state = state
+        self._publish_claw_state(state, log=log)
+
+    def _maybe_auto_set_silo_claw(self, now: float) -> None:
+        if self._arm_state != 'SILO_IN':
+            return
+        if self._silo_in_auto_claw_done:
+            return
+        if (now - self._last_transition_ts) < 0.1:
+            return
+        if self._claw_state == CLAW_SPEAR:
+            self._silo_in_auto_claw_done = True
+            return
+        self._silo_in_auto_claw_done = True
+        self._set_claw_state(CLAW_SPEAR)
+
+    def _apply_arm_state(self):
+        pose = self._pose_map.get(self._arm_state, np.array([0.0, 0.0], dtype=float))
+        wrist = float(self._wrist_angle_map.get(self._arm_state, 0.0))
+        # Use independent claw toggle state rather than state machine map
+        claw_state = self._claw_state
+        self.arm_target[:] = pose
+        # Use non-zero end velocity on travel waypoints to smooth transitions
+        # Include RELEASE so it can flow-through to GROUND_IN_PARALLEL automatically
+        if self._arm_state in ("PLACE_HEAD_WRIST_TRAVEL", "PLACE_SIDE_WRIST_TRAVEL", "RELEASE", "PLACE_HEAD_FROM_LEGAL_START_TRAVEL"):
+            evf = self.arm_intermediate_end_velocity_frac
+        else:
+            evf = 0.0
+        self._arm_publish_targets(float(pose[0]), float(pose[1]), wrist, claw_state, end_velocity_frac=evf)
+        color = self._arm_indicator_color_map.get(self._arm_state)
+        if color:
+            self._publish_indicator_color(color)
+        self._maybe_publish_arm_state(self._arm_state)
+
+    def _begin_intermediate_monitor(self, state_name: str):
+        """Initialize crossing detection for an intermediate waypoint state."""
+        tgt = self._pose_map.get(state_name)
+        self._intermediate_target = tgt.copy() if tgt is not None else None
+        if self._arm_pos is not None and self._intermediate_target is not None:
+            s_err = float(self._intermediate_target[0]) - float(self._arm_pos[0])
+            e_err = float(self._intermediate_target[1]) - float(self._arm_pos[1])
+            self._intermediate_prev_err = (s_err, e_err)
+            self.logger.debug(
+                f"Intermediate monitor start: target=({self._intermediate_target[0]:.3f}, {self._intermediate_target[1]:.3f}), "
+                f"err=({s_err:.3f}, {e_err:.3f})"
+            )
+        else:
+            self._intermediate_prev_err = None
+
+    def _clear_intermediate_monitor(self):
+        self._intermediate_target = None
+        self._intermediate_prev_err = None
+
+    def _arm_crossed_intermediate(self) -> bool:
+        """Return True if each joint error changed sign relative to previous reading.
+
+        Uses zero-crossing of error (target - measured). Requires at least one
+        previous reading; updates the stored previous error each call.
+        """
+        if self._arm_pos is None or self._intermediate_target is None:
+            return False
+        s_err = float(self._intermediate_target[0]) - float(self._arm_pos[0])
+        e_err = float(self._intermediate_target[1]) - float(self._arm_pos[1])
+        crossed = False
+        if self._intermediate_prev_err is not None:
+            ps, pe = self._intermediate_prev_err
+            # Consider zero or sign flip as crossing
+            s_cross = (ps > 0 and s_err <= 0) or (ps < 0 and s_err >= 0) or s_err == 0.0
+            e_cross = (pe > 0 and e_err <= 0) or (pe < 0 and e_err >= 0) or e_err == 0.0
+            crossed = bool(s_cross or e_cross)
+            if crossed:
+                self.logger.info(
+                    f"Arm crossed intermediate: prev_err=({ps:.3f},{pe:.3f}) curr_err=({s_err:.3f},{e_err:.3f})"
+                )
+        # Update previous for next iteration
+        self._intermediate_prev_err = (s_err, e_err)
+        return crossed
+
+    def _arm_near_target(self, target: np.ndarray) -> bool:
+        """Return True if measured arm joints are within tolerance of target (radians)."""
+        if self._arm_pos is None:
+            return False
+        shoulder_err = abs(float(self._arm_pos[0]) - float(target[0]))
+        elbow_err = abs(float(self._arm_pos[1]) - float(target[1]))
+        return shoulder_err <= self.arm_pos_tol_rad and elbow_err <= self.arm_pos_tol_rad
+
+    def _update_arm_state_machine(self, now: float):
+        btn = self._read_buttons() or {}
+
+        # Debounce window
+        if (now - self._last_transition_ts) < self._debounce_s:
+            self._maybe_auto_set_silo_claw(now)
+            self._btn_prev = {k: bool(btn.get(k, False)) for k in ('square','cross','circle','triangle','l1','left_bumper')}
+            # Still handle triggers in parallel even if debouncing buttons
+            self._handle_triggers(btn)
+            return
+        prev = self._btn_prev
+        def pressed(name: str) -> bool:
+            return bool(btn.get(name, False)) and not bool(prev.get(name, False))
+
+        # State transitions
+        s = self._arm_state
+        transitioned = False 
+        if self.is_first_arm_update:
+            self.is_first_arm_update = False
+            transitioned = True
+            return     
+        # INIT -> STOW is implicit at startup (we start in STOW)
+        if s == 'STOW':
+            if pressed('triangle'):
+                self._arm_state = 'PLACE_HEAD_WRIST_TRAVEL'; transitioned = True; self._wrist_travel_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
+            elif pressed('circle'):
+                self._arm_state = 'SILO_IN'; transitioned = True
+            elif pressed('cross'):
+                self._arm_state = 'GROUND_IN_PARALLEL'; transitioned = True
+        elif s == 'PLACE_HEAD_WRIST_TRAVEL' or s == 'PLACE_SIDE_WRIST_TRAVEL' or s == 'PLACE_HEAD_FROM_LEGAL_START_TRAVEL':
+            # Prefer crossing-based transition; use 3s timer as obvious fallback
+            if self._arm_crossed_intermediate():
+                self.logger.info("Arm crossed intermediate target; advancing to PLACE state")
+                self._arm_state = 'PLACE_HEAD' if s == 'PLACE_HEAD_WRIST_TRAVEL' or s == 'PLACE_HEAD_FROM_LEGAL_START_TRAVEL' else 'PLACE_SIDE'; transitioned = True; self._clear_intermediate_monitor()
+            elif self._wrist_travel_timer.elapsed():
+                self.logger.warning("Fallback: wrist travel timer elapsed (3s); advancing state")
+                self._arm_state = 'PLACE_HEAD' if s == 'PLACE_HEAD_WRIST_TRAVEL' or s == 'PLACE_HEAD_FROM_LEGAL_START_TRAVEL' else 'PLACE_SIDE'; transitioned = True; self._clear_intermediate_monitor()
+        elif s in ('PLACE_HEAD', 'PLACE_SIDE'):
+            if pressed('circle'):
+                if self._arm_state == 'PLACE_HEAD':
+                    self._arm_state = 'RELEASE'; transitioned = True; self._wrist_travel_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
+                else:
+                    self._arm_state = 'PLACE_HEAD'; transitioned = True; self._wrist_travel_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
+            elif pressed('cross'):
+                self._arm_state = 'PLACE_HIGH_TO_GROUND_TRANSITION'; transitioned = True; self._wrist_travel_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
+        elif s == 'PLACE_HIGH_TO_GROUND_TRANSITION':
+            if self._wrist_travel_timer.elapsed():
+                self._arm_state = 'GROUND_IN_PARALLEL'; transitioned = True; self._clear_intermediate_monitor()
+        elif s == 'RELEASE':
+            # Prefer crossing-based transition; use timer as fallback; allow manual advance on Cross
+            if self._arm_crossed_intermediate():
+                self.logger.info("Arm crossed RELEASE; advancing to STOW")
+                self._arm_state = 'STOW'; transitioned = True; self._clear_intermediate_monitor()
+            elif self._wrist_travel_timer.elapsed():
+                self.logger.warning("Fallback: RELEASE timer elapsed; advancing to STOW")
+                self._arm_state = 'STOW'; transitioned = True; self._clear_intermediate_monitor()
+            elif pressed('cross'):
+                self._arm_state = 'STOW'; transitioned = True; self._clear_intermediate_monitor()
+        elif s == 'GROUND_IN_PARALLEL':
+            l1_toggle = pressed('l1') or pressed('left_bumper')
+            if l1_toggle:
+                self._arm_state = 'GROUND_IN_MAXIMUM_OUT'; transitioned = True
+            elif pressed('circle'):
+                self._arm_state = 'SILO_IN'; transitioned = True
+            elif pressed('cross'):
+                self._arm_state = 'STOW'; transitioned = True
+            elif pressed('triangle'):
+                self._arm_state = 'PLACE_HEAD_WRIST_TRAVEL'; transitioned = True; self._wrist_travel_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
+
+        elif s == 'GROUND_IN_MAXIMUM_OUT':
+            l1_toggle = pressed('l1') or pressed('left_bumper')
+            if l1_toggle:
+                self._arm_state = 'GROUND_IN_PARALLEL'; transitioned = True
+            elif pressed('cross'):
+                self._arm_state = 'STOW'; transitioned = True
+
+        elif s == 'SILO_IN':
+            if pressed('circle'):
+                self._arm_state = 'SILO_PULL_OUT'; transitioned = True
+            elif pressed('cross'):
+                self._arm_state = 'STOW'; transitioned = True; self._wrist_travel_timer.reset()
+            elif pressed('triangle'):
+                self._arm_state = 'PLACE_HEAD_WRIST_TRAVEL'; transitioned = True; self._pull_out_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
+        elif s == 'UP':
+            if pressed('direction_down'):
+                self._arm_state = 'LEGAL_START'; transitioned = True
+        elif s == 'EXIT_LEGAL_START_INTERMEDIATE_STATE':
+            if self._legal_start_intermediate_state_timer.elapsed():
+                self._arm_state = 'EXIT_LEGAL_START_INTERMEDIATE_STATE_2'; transitioned = True; self._legal_start_intermediate_state_timer_2.reset(); self._begin_intermediate_monitor(self._arm_state)
+        elif s == 'EXIT_LEGAL_START_INTERMEDIATE_STATE_2':
+            if self._legal_start_intermediate_state_timer_2.elapsed():
+                self._arm_state = 'STOW'; transitioned = True; self._clear_intermediate_monitor()
+        elif s == 'LEGAL_START':
+            if pressed('triangle'):
+                self._arm_state = 'PLACE_HEAD_FROM_LEGAL_START_TRAVEL'; transitioned = True; self._wrist_travel_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
+            if pressed('circle'):
+                self._arm_state = 'EXIT_LEGAL_START_INTERMEDIATE_STATE'; transitioned = True; self._legal_start_intermediate_state_timer.reset(); self._begin_intermediate_monitor(self._arm_state)
+        elif s == 'SILO_PULL_OUT':
+            if self._pull_out_timer.elapsed():
+                self._arm_state = 'STOW'; transitioned = True; self._clear_intermediate_monitor()
+        elif s == 'UNFLIP':
+            if pressed('circle'):
+                self._arm_state = 'STOW'; transitioned = True
+
+        if pressed('direction_up'):
+            self._arm_state = 'UP'; transitioned = True
+
+        if pressed('direction_right'):
+            self._arm_state = 'UNFLIP'; transitioned = True
+
+        if transitioned:
+            self._last_transition_ts = now
+            if self._arm_state == 'STOW':
+                self._set_claw_state(CLAW_CLOSED)
+            self._silo_in_auto_claw_done = self._arm_state != 'SILO_IN'
+        self._maybe_auto_set_silo_claw(now)
+        self._apply_arm_state()
+
+        # Save for edge detection next time
+        self._btn_prev = {k: bool(btn.get(k, False)) for k in ('square','cross','circle','triangle','l1','left_bumper')}
+        # Also handle triggers (GoTo) each cycle
+        self._handle_triggers(btn)
+
+    def _handle_triggers(self, btn: dict):
+        # Thresholding with edge detection
+        l2 = float(btn.get('l2', 0.0)) * 0.35
+        r2 = float(btn.get('r2', 0.0)) * 0.60
+        intake_power = 0.11
+        if (self._arm_state == 'GROUND_IN_PARALLEL' or self._arm_state == 'GROUND_IN_MAXIMUM_OUT') and self._claw_state == CLAW_OPEN and r2 < intake_power:
+            r2 = intake_power
+        l2_now = l2 > 0.5
+        r2_now = r2 > 0.5
+        self._publish_intake_power(r2)
+        self._publish_roller_power(l2)
+        # if l2_now and not self._l2_active:
+        #     # SILO position (placeholder zeros)
+        #     try:
+        #         pose = Pose2D(timestamp=time.time(), x=0.0, y=0.0, theta=0.0)
+        #         self.put(self.target_topic, to_zenoh_value(pose))
+        #         self.put(self.goto_start_topic, to_zenoh_value(True))
+        #     except Exception:
+        #         pass
+        # if r2_now and not self._r2_active:
+        #     # GOAL position (placeholder zeros)
+        #     try:
+        #         pose = Pose2D(timestamp=time.time(), x=0.0, y=0.0, theta=0.0)
+        #         self.put(self.target_topic, to_zenoh_value(pose))
+        #         self.put(self.goto_start_topic, to_zenoh_value(True))
+        #     except Exception:
+        #         pass
+        self._l2_active = l2_now
+        self._r2_active = r2_now
+
+    def _publish_intake_power(self, power: float) -> None:
+        try:
+            clamped = max(-1.0, min(1.0, float(power)))
+        except Exception:
+            clamped = 0.0
+        if abs(clamped) < self.intake_power_deadband:
+            clamped = 0.0
+        if self._last_intake_power is not None and abs(clamped - self._last_intake_power) < 1e-3:
+            return
+        try:
+            self.put(self.intake_speed_topic, to_zenoh_value(float(clamped)))
+            self._last_intake_power = clamped
+        except Exception as e:
+            self.logger.debug(f"Failed to publish intake power: {e}")
+
+    def _publish_roller_power(self, power: float) -> None:
+        try:
+            clamped = max(-1.0, min(1.0, float(power)))
+        except Exception:
+            clamped = 0.0
+        if abs(clamped) < self.intake_power_deadband:
+            clamped = 0.0
+        if self._last_roller_power is not None and abs(clamped - self._last_roller_power) < 1e-3:
+            return
+        try:
+            self.put(self.roller_speed_topic, to_zenoh_value(float(clamped)))
+            self._last_roller_power = clamped
+        except Exception as e:
+            self.logger.debug(f"Failed to publish roller power: {e}")
 
     
     def _create_twist_message(self, linear_x, linear_y, angular_z):
@@ -277,14 +1000,27 @@ class TeleopNode(BaseNode):
     def step(self):
         """Main processing loop."""
         try:
+            self.logger.info(f"Arm State: {self._arm_state}")
             now = time.time()
+            if self._startup_indicator_color:
+                if self._indicator_color == self._startup_indicator_color:
+                    self._startup_indicator_color = None
+                else:
+                    self._publish_indicator_color(self._startup_indicator_color, force=True)
+                    if self._indicator_color == self._startup_indicator_color:
+                        self._startup_indicator_color = None
             # Read controller inputs
             inputs = self._read_controller_inputs()
+            buttons = self._read_buttons()
             
             # Get twist commands from controller (joystick frame)
             linear_x = inputs['linear_x']
             linear_y = -inputs['linear_y']
             angular_z = -inputs['angular_z']
+            self.logger.info("buttons: ", buttons)
+            if buttons['l2'] > 0.5:
+                angular_z = self.angle_pid.update(-self.current_theta, np.deg2rad(0.0))
+
             # Compute dt
             if self._last_time is None:
                 dt = 1.0 / max(self.update_rate, 1e-6)
@@ -292,8 +1028,34 @@ class TeleopNode(BaseNode):
                 dt = max(now - self._last_time, 1e-6)
             self._last_time = now
 
+            # Claw toggle (edge-triggered)
+            try:
+                btn = self._read_buttons() or {}
+                rb_now = bool(btn.get('right_bumper', False))
+                lb_now = bool(btn.get('left_bumper', False))
+                if rb_now and not self._rb_prev:
+                    if self._arm_state == "PLACE_HEAD" or self._arm_state == "SILO_IN" and self._claw_state == CLAW_CLOSED:
+                        target = CLAW_SPEAR
+                    elif self._claw_state == CLAW_SPEAR:
+                        target = CLAW_CLOSED
+                    elif self._claw_state == CLAW_OPEN:
+                        target = CLAW_CLOSED
+                    else:
+                        target = CLAW_OPEN
+                    self._set_claw_state(target)
+                if lb_now and not self._lb_prev:
+                    self._zero_robot_heading()
+                self._rb_prev = rb_now
+                self._lb_prev = lb_now
+            except Exception as e:
+                self.logger.debug(f"Claw toggle handling error: {e}")
+
             # Update target editing from buttons (and publish)
             self._update_target_from_inputs(dt)
+            # Update arm control from D-pad (debounced small steps)
+            self._update_arm_from_hat(now)
+            # Update arm state machine + triggers (debounced)
+            self._update_arm_state_machine(now)
 
             # Teleop mode only: optionally convert to robot-frame using SE2 exp/log mapping
             if self.field_relative:
@@ -325,9 +1087,11 @@ class TeleopNode(BaseNode):
                     self._teleop_active = False
                 # Do not continuously publish zeros; allow mux to select autonomy
             else:
-                # Inputs active: publish at rate and mark active
+                # Inputs active: apply acceleration limiting and publish
                 self._teleop_active = True
-                twist_msg = self._create_twist_message(linear_x, linear_y, angular_z)
+                
+                limited = apply_acceleration_limit(Twist2dVelocity(linear_x, linear_y, angular_z), dt)
+                twist_msg = self._create_twist_message(limited.vx, limited.vy, limited.w)
                 self.put(self.twist_topic, to_zenoh_value(twist_msg))
             
             # Log status periodically
@@ -370,3 +1134,48 @@ class TeleopNode(BaseNode):
 def clipped_cos(x):
     x = max(min(x, np.pi/2), -np.pi/2)
     return math.cos(x)
+
+
+class ElapsedTimer:
+    def __init__(self, duration_s: float):
+        self.duration_s = duration_s
+        self.start_ts = time.time()
+
+    def elapsed(self) -> bool:
+        return time.time() - self.start_ts >= self.duration_s
+    
+    def reset(self):
+        self.start_ts = time.time()
+
+
+class AnglePID:
+    def __init__(self, kp: float, ki: float, kd: float, max_integral: float = 1.0):
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.integral = 0.0
+        self.last_error = 0.0
+        self.last_time = time.time()
+        
+    def update(self, current_angle: float, target_angle: float):
+        dt = time.time() - self.last_time
+        if dt > 0.2:
+            dt = 0.0
+        error = self.wrap_angle(target_angle - current_angle)
+        self.integral += error * dt
+
+        if dt > 0.0:
+            derivative = (error - self.last_error) / dt
+        else:
+            derivative = 0.0
+
+        self.last_error = error
+        self.last_time = time.time()
+        return self.kp * error + self.ki * self.integral + self.kd * derivative
+
+    def wrap_angle(self, angle: float):
+        while angle > math.pi:
+            angle -= 2 * math.pi
+        while angle < -math.pi:
+            angle += 2 * math.pi
+        return angle

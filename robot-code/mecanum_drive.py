@@ -17,7 +17,7 @@ class MecanumDrive:
     - Motor 2: Back Right
     """
     
-    def __init__(self, motor_ids=[4, 1, 3, 2], servo_bus_map=None):
+    def __init__(self, motor_ids=[4, 1, 3, 2], servo_bus_map=None, transport=None):
         """
         Initialize the mecanum drive.
         
@@ -49,11 +49,11 @@ class MecanumDrive:
         self.previous_motor_velocities = {motor_id: 0.0 for motor_id in motor_ids}
 
         # Setup transport
-        if servo_bus_map is None:
-            servo_bus_map = {1: [1,2], 2: [3,4]}  # Default: all motors on bus 1
-        
-        self.transport = moteus_pi3hat.Pi3HatRouter(servo_bus_map=servo_bus_map)
-        
+        # Allow an external transport to be provided so multiple controllers can share it.
+        if transport is not None:
+            self.transport = transport
+        else:
+            raise ValueError("Transport must be provided")
         # Create motor controllers
         self.motors = {
             motor_id: moteus.Controller(id=motor_id, transport=self.transport) 
@@ -153,24 +153,28 @@ class MecanumDrive:
                 position=math.nan,
                 velocity=self.wheel_speed_to_motor_speed(front_left_ms) * self.motor_directons[self.front_left_id],
                 maximum_torque=1.0,
+                accel_limit=200.0,
                 query=query_velocities
             ),
             self.motors[self.front_right_id].make_position(
                 position=math.nan,
                 velocity=self.wheel_speed_to_motor_speed(front_right_ms) * self.motor_directons[self.front_right_id],
                 maximum_torque=1.0,
+                accel_limit=200.0,
                 query=query_velocities
             ),
             self.motors[self.back_left_id].make_position(
                 position=math.nan,
                 velocity=self.wheel_speed_to_motor_speed(back_left_ms) * self.motor_directons[self.back_left_id],
                 maximum_torque=1.0,
+                accel_limit=200.0,
                 query=query_velocities
             ),
             self.motors[self.back_right_id].make_position(
                 position=math.nan,
                 velocity=self.wheel_speed_to_motor_speed(back_right_ms) * self.motor_directons[self.back_right_id],
                 maximum_torque=1.0,
+                accel_limit=200.0,
                 query=query_velocities
             )
         ]
@@ -181,19 +185,21 @@ class MecanumDrive:
         if query_velocities and results:
             wheel_velocities = {}
             for result in results:
-                if result.id in self.motor_ids:
+                rid = getattr(result, "id", None)
+                if rid in self.motor_ids:
                     try:
                         motor_speed = result.values[moteus.Register.VELOCITY]
-                        wheel_speed = self.motor_speed_to_wheel_speed(motor_speed, result.id)
-                        wheel_velocities[result.id] = wheel_speed
+                        wheel_speed = self.motor_speed_to_wheel_speed(motor_speed, rid)
+                        wheel_velocities[rid] = wheel_speed
                         # Update previous velocity for fallback
-                        self.previous_motor_velocities[result.id] = motor_speed
+                        self.previous_motor_velocities[rid] = motor_speed
                     except (KeyError, AttributeError):
                         # Use previous velocity if current read fails
-                        wheel_speed = self.motor_speed_to_wheel_speed(
-                            self.previous_motor_velocities[result.id], result.id
-                        )
-                        wheel_velocities[result.id] = wheel_speed
+                        if rid in self.previous_motor_velocities:
+                            wheel_speed = self.motor_speed_to_wheel_speed(
+                                self.previous_motor_velocities[rid], rid
+                            )
+                            wheel_velocities[rid] = wheel_speed
             
             # Convert to named format
             return {
@@ -237,21 +243,23 @@ class MecanumDrive:
         # Parse the results and convert to wheel speeds
         wheel_velocities = {}
         for result in results:
-            if result.id in self.motor_ids:
+            rid = getattr(result, "id", None)
+            if rid in self.motor_ids:
                 try:
                     motor_speed = result.values[moteus.Register.VELOCITY]
-                    wheel_speed = self.motor_speed_to_wheel_speed(motor_speed, result.id)
-                    wheel_velocities[result.id] = wheel_speed
+                    wheel_speed = self.motor_speed_to_wheel_speed(motor_speed, rid)
+                    wheel_velocities[rid] = wheel_speed
                     # Update previous velocity for fallback
-                    self.previous_motor_velocities[result.id] = motor_speed
+                    self.previous_motor_velocities[rid] = motor_speed
                 except (KeyError, AttributeError):
                     # Use previous velocity if current read fails
-                    print(f"Failed to read velocity for motor {result.id}, using previous value")
-                    wheel_speed = self.motor_speed_to_wheel_speed(
-                        self.previous_motor_velocities[result.id], result.id
-                    )
-                    wheel_velocities[result.id] = wheel_speed
-        
+                    if rid in self.previous_motor_velocities:
+                        print(f"Failed to read velocity for motor {rid}, using previous value")
+                        wheel_speed = self.motor_speed_to_wheel_speed(
+                            self.previous_motor_velocities[rid], rid
+                        )
+                        wheel_velocities[rid] = wheel_speed
+
         return wheel_velocities
     
     async def get_wheel_velocities_named(self):

@@ -14,12 +14,9 @@ import json
 from tide import CmdTopic, StateTopic, robot_topic
 
 # Import Tide models and serialization
-try:
-    from tide.models import Twist2D, Vector2, Vector3
-    from tide.models.serialization import to_zenoh_value, from_zenoh_value
-except ImportError:
-    print("Error: tide-sdk package not found. Install with: pip install tide-sdk")
-    sys.exit(1)
+from tide.models import Twist2D, Vector2, Vector3
+from tide.models.serialization import to_zenoh_value, from_zenoh_value
+
 
 # Add current directory to path to import mecanum_drive
 sys.path.append(os.path.dirname(__file__))
@@ -31,6 +28,7 @@ except ImportError:
     sys.exit(1)
 
 from mecanum_drive import MecanumDrive
+from moteus_hardware import MoteusHardware
 
 # Global state variables (following example_moteus_swerve.py pattern)
 last_recv = time.monotonic()
@@ -44,9 +42,19 @@ ROBOT_ID = "cash"
 VELOCITY_KEY = robot_topic(ROBOT_ID, CmdTopic.TWIST.value).strip('/')
 STATE_TWIST_KEY = robot_topic(ROBOT_ID, StateTopic.TWIST.value).strip('/')
 GYRO_KEY = robot_topic(ROBOT_ID, "sensor/imu/gyro").strip('/')
+POWER_STATE_KEY = robot_topic(ROBOT_ID, "state/power/dist").strip('/')
 
-# Drive controller
-drive = None
+# Hardware (shared transport for drivetrain + arm)
+hardware: MoteusHardware | None = None
+drive: MecanumDrive | None = None
+
+# Arm control state (radians). Initialize to +pi/2 so no motion on startup.
+arm_target = Vector2(x=math.pi/2, y=math.pi/2)  # shoulder, elbow in radians
+# End-velocity fraction for arm waypoint (0..1). 0.0 means stop at waypoint.
+arm_end_velocity_frac: float = 0.0
+ARM_CMD_TIMEOUT = 2.0
+last_arm_recv = 0.0
+last_power_publish = 0.0
 
 def zenoh_velocity_listener(sample):
     """Callback for incoming velocity commands using Tide serialization."""
@@ -78,21 +86,18 @@ def zenoh_gyro_listener(sample):
 
 async def initialize_drive():
     """Initialize the mecanum drive system."""
-    global drive
-    if drive is None:
-        print("Initializing mecanum drive...")
-        try:
-            drive = MecanumDrive()
-            await drive.set_stops()
-            print("Mecanum drive initialized successfully")
-        except Exception as e:
-            print(f"Failed to initialize mecanum drive: {e}")
-            raise
-    return drive
+    global hardware, drive
+    if hardware is None:
+        print("Initializing shared moteus hardware (drive + arm)...")
+        hardware = MoteusHardware(robot_id=ROBOT_ID)
+        await hardware.initialize()
+        drive = hardware.drive
+        print("Hardware initialized successfully")
+    return drive  # type: ignore[return-value]
 
 async def main():
     """Main function - simple control loop following example_moteus_swerve.py pattern."""
-    global drive, reference_vx, reference_vy, reference_w, last_recv
+    global drive, reference_vx, reference_vy, reference_w, last_recv, last_power_publish
     
     print("Starting simplified standalone drivetrain controller...")
     
@@ -104,12 +109,46 @@ async def main():
     _ = session.declare_subscriber(VELOCITY_KEY, zenoh_velocity_listener)
     _ = session.declare_subscriber(GYRO_KEY, zenoh_gyro_listener)
     
+    # Arm command subscription (Vector2: x=shoulder, y=elbow in radians)
+    ARM_CMD_KEY = robot_topic(ROBOT_ID, "cmd/arm/target").strip('/')
+    print(f"DEBUG: ARM_CMD_KEY = '{ARM_CMD_KEY}'")
+    def _arm_cmd_listener(sample):
+        global last_arm_recv, arm_target, arm_end_velocity_frac
+        print(f"DEBUG: Received arm command on topic '{sample.key_expr}'")
+        try:
+            # Prefer Vector3 (x=shoulder rad, y=elbow rad, z=end_velocity_frac)
+            try:
+                vec3 = from_zenoh_value(sample.payload, Vector3)
+                arm_target = Vector2(x=float(vec3.x), y=float(vec3.y))
+                arm_end_velocity_frac = float(vec3.z)
+            except Exception:
+                # Fallback to legacy Vector2 without velocity (defaults to 0 end velocity)
+                vec2 = from_zenoh_value(sample.payload, Vector2)
+                arm_target = Vector2(x=float(vec2.x), y=float(vec2.y))
+                arm_end_velocity_frac = 0.0
+            last_arm_recv = time.monotonic()
+            print(
+                f"Arm cmd: shoulder={arm_target.x:.3f} rad, elbow={arm_target.y:.3f} rad, "
+                f"end_vel_frac={arm_end_velocity_frac:.2f}"
+            )
+        except Exception as e:
+            print(f"Failed to parse arm command: {e}")
+    arm_subscriber = session.declare_subscriber(ARM_CMD_KEY, _arm_cmd_listener)
+    print(f"DEBUG: Declared subscriber for '{ARM_CMD_KEY}'")
+    
     # Publisher for state twist
     state_twist_pub = session.declare_publisher(STATE_TWIST_KEY)
+    # Publisher for arm state (Vector2: joint angles, radians)
+    ARM_STATE_KEY = robot_topic(ROBOT_ID, "state/arm/position").strip('/')
+    arm_state_pub = session.declare_publisher(ARM_STATE_KEY)
+    # Publisher for power diagnostics (dict payload)
+    power_state_pub = session.declare_publisher(POWER_STATE_KEY)
     
     print(f"Subscribed to {VELOCITY_KEY}")
     print(f"Subscribed to {GYRO_KEY}")
     print(f"Publishing state to {STATE_TWIST_KEY}")
+    print(f"Subscribed to {ARM_CMD_KEY}")
+    print(f"Publishing arm state to {ARM_STATE_KEY}")
     
     # Initialize the drive
     await initialize_drive()
@@ -137,6 +176,17 @@ async def main():
                 wheel_velocities = await drive.drive(
                     reference_vx, reference_vy, reference_w, query_velocities=True
                 )
+
+                # Command arm position and query state in same cycle (avoid query-only packet)
+                arm_state = None
+                if hardware is not None:
+                    print(f"Arm target: {arm_target.x:.3f} rad, {arm_target.y:.3f} rad")
+                    arm_state = await hardware.arm.set_targets(
+                        arm_target.x,
+                        arm_target.y,
+                        end_velocity_frac=arm_end_velocity_frac,
+                        query=True,
+                    )
                 
                 # Publish state if we got wheel velocities back
                 if wheel_velocities:
@@ -163,10 +213,31 @@ async def main():
                     )
                     payload = to_zenoh_value(current_twist)
                     state_twist_pub.put(payload)
+
+                # Publish arm joint positions from same cycle result
+                if hardware is not None and arm_state is not None:
+                    s, e = arm_state
+                    arm_state_pub.put(to_zenoh_value(Vector2(x=s, y=e)))
                     
                     if step_count % 60 == 0:  # Log every 2 seconds at 30Hz
                         print(f"Driving: cmd=({reference_vx:.2f}, {reference_vy:.2f}, {reference_w:.2f}), "
                                 f"actual=({actual_vx:.2f}, {actual_vy:.2f}, {actual_w:.2f})")
+
+                # Publish power diagnostics at ~10 Hz if available
+                if hardware is not None and hardware.power_stream_ready:
+                    now = time.monotonic()
+                    if now - last_power_publish >= 0.1:
+                        try:
+                            power_data = await hardware.read_power_diagnostics()
+                        except Exception as exc:
+                            print(f"Failed to read power diagnostics: {exc}")
+                            power_data = None
+                        if power_data:
+                            try:
+                                power_state_pub.put(to_zenoh_value(power_data))
+                                last_power_publish = now
+                            except Exception as exc:
+                                print(f"Failed to publish power diagnostics: {exc}")
             
             except Exception as e:
                 print(f"Error executing drive command: {e}")
@@ -183,9 +254,9 @@ async def main():
         print(f"Unexpected error: {e}")
     finally:
         # Stop all motors
-        if drive:
+        if hardware and hardware.drive:
             try:
-                await drive.stop_all_motors()
+                await hardware.stop_all()
                 print("Motors stopped")
             except Exception as e:
                 print(f"Error stopping motors: {e}")
